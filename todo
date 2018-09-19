@@ -1,0 +1,12 @@
+Override based on command line regex
+
+Overlay mode:
+-Need to list windows at screenshot time then figure out what area is selected
+-Need to overlay on every monitor
+-- stretch goal: snap to windows for single clicks
+
+window info:
+Map State: IsViewable
+
+Consider flameshot for a better selection UI?
+
