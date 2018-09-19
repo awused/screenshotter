@@ -16,6 +16,7 @@ import (
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/ewmh"
+	"github.com/BurntSushi/xgbutil/xprop"
 	"github.com/awused/awconf"
 	"github.com/gen2brain/beeep"
 	"github.com/shirou/gopsutil/process"
@@ -140,12 +141,12 @@ func getFileName(name string) string {
 		return filepath.Join(
 			path,
 			d.Format("2006"),
-			d.Format("03-02_15-04-05")+".png")
+			d.Format("01-02_15-04-05")+".png")
 	}
 
 	return filepath.Join(
 		path,
-		d.Format("2006-03-02_15-04-05")+".png")
+		d.Format("2006-01-02_15-04-05")+".png")
 }
 
 func initXConn() {
@@ -202,7 +203,7 @@ func getMouseWindowApplication() string {
 
 	matches := re.FindSubmatch(out)
 	if matches == nil {
-		panic("desktop")
+		return "desktop"
 	}
 
 	wid, err := strconv.Atoi(string(matches[1]))
@@ -310,6 +311,7 @@ func youngestChild(p *process.Process, wid xproto.Window) *process.Process {
 	return child
 }
 
+// p can be nil
 func overrideName(name string, p *process.Process) string {
 	for _, o := range c.Overrides {
 		// TODO -- check regex match
@@ -325,36 +327,49 @@ func overrideName(name string, p *process.Process) string {
 }
 
 func getTargetProcess(wid xproto.Window) string {
+	var name string
+	var prc *process.Process
+
 	pid, err := ewmh.WmPidGet(xu, wid)
 	if err != nil {
-		// No PID -> probably the root window
-		return c.Fallback
-	}
-	prc, err := process.NewProcess(int32(pid))
-	if err != nil {
-		panic(err)
-	}
-
-	pName, err := prc.Name()
-	if err != nil {
-		panic(err)
-	}
-
-	name := convertApplicationName(filepath.Base(pName))
-
-	for contains(c.IgnoredParents, name) {
-		child := youngestChild(prc, wid)
-		if child == nil {
-			break
+		// No PID -> get window name
+		name, err = ewmh.WmNameGet(xu, wid)
+		if name == "" {
+			// No _NET_WM_NAME -> get WM_NAME
+			name, err = xprop.PropValStr(xprop.GetProperty(xu, wid, "WM_NAME"))
 		}
-		prc = child
 
-		pName, err = prc.Name()
+		if err != nil {
+			// No window name -> probably root window
+			return c.Fallback
+		}
+	} else {
+		prc, err = process.NewProcess(int32(pid))
 		if err != nil {
 			panic(err)
 		}
 
-		name = convertApplicationName(filepath.Base(pName))
+		pName, err := prc.Name()
+		if err != nil {
+			panic(err)
+		}
+
+		name := convertApplicationName(filepath.Base(pName))
+
+		for contains(c.IgnoredParents, name) {
+			child := youngestChild(prc, wid)
+			if child == nil {
+				break
+			}
+			prc = child
+
+			pName, err = prc.Name()
+			if err != nil {
+				panic(err)
+			}
+
+			name = convertApplicationName(filepath.Base(pName))
+		}
 	}
 
 	return overrideName(name, prc)
