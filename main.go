@@ -281,8 +281,6 @@ func youngestChild(p *process.Process, wid xproto.Window) *process.Process {
 	var childtime int64
 
 	for _, c := range children {
-		// TODO -- check WINDOWID, needs to parse /proc
-
 		if hasWindowID != no {
 			if procInWindow(c, wid) {
 				if hasWindowID != yes {
@@ -354,7 +352,7 @@ func getTargetProcess(wid xproto.Window) string {
 			panic(err)
 		}
 
-		name := convertApplicationName(filepath.Base(pName))
+		name = convertApplicationName(filepath.Base(pName))
 
 		for contains(c.IgnoredParents, name) {
 			child := youngestChild(prc, wid)
