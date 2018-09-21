@@ -339,8 +339,10 @@ func getTargetProcess(wid xproto.Window) string {
 
 		if err != nil {
 			// No window name -> probably root window
-			return c.Fallback
+			return convertApplicationName(c.Fallback)
 		}
+
+		name = convertApplicationName(name)
 	} else {
 		prc, err = process.NewProcess(int32(pid))
 		if err != nil {
