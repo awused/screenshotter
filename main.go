@@ -349,7 +349,8 @@ func getTargetProcess(wid xproto.Window) string {
 			panic(err)
 		}
 
-		pName, err := prc.Name()
+		// Name() can include flags and arguments
+		pName, err := prc.Exe()
 		if err != nil {
 			panic(err)
 		}
