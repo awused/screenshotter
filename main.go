@@ -50,6 +50,8 @@ var hasWindowID = maybe
 var xu *xgbutil.XUtil
 var c *config
 
+var debug = false
+
 // TODO -- urface/cli
 func main() {
 	if len(os.Args) < 2 {
@@ -63,6 +65,11 @@ func main() {
 
 	if !c.CheckWindowID {
 		hasWindowID = no
+	}
+
+	// TODO -- better cli arg parsing
+	if len(os.Args) >= 2 && os.Args[2] == "--debug" {
+		debug = true
 	}
 
 	tmpFile := mkTemp()
@@ -313,12 +320,38 @@ func youngestChild(p *process.Process, wid xproto.Window) *process.Process {
 func overrideName(name string, p *process.Process) string {
 	for _, o := range c.Overrides {
 		// TODO -- check regex match
-		if o.Name == name {
-			fName := convertApplicationName(o.Format)
+		if o.Name != name {
+			continue
+		}
 
-			if fName != "" {
-				return fName
+		format := o.Format
+		if p != nil && o.Regex != "" {
+			re := regexp.MustCompile(o.Regex)
+
+			cmdline, err := p.Cmdline()
+			if err != nil {
+				panic(err)
 			}
+			matches := re.FindStringSubmatch(cmdline)
+			if matches == nil {
+				continue
+			}
+			var interfaces []interface{} = make([]interface{}, len(matches))
+			for i, m := range matches {
+				interfaces[i] = m
+			}
+			format = fmt.Sprintf(format, interfaces...)
+
+			if debug {
+				fmt.Println(matches)
+				fmt.Println(format)
+			}
+		}
+
+		fName := convertApplicationName(format)
+
+		if fName != "" {
+			return fName
 		}
 	}
 	return name
@@ -347,6 +380,12 @@ func getTargetProcess(wid xproto.Window) string {
 		prc, err = process.NewProcess(int32(pid))
 		if err != nil {
 			panic(err)
+		}
+
+		if debug {
+			fmt.Println(prc.Name())
+			fmt.Println(prc.Exe())
+			fmt.Println(prc.Cmdline())
 		}
 
 		// Name() can include flags and arguments
