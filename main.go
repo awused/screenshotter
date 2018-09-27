@@ -68,7 +68,7 @@ func main() {
 	}
 
 	// TODO -- better cli arg parsing
-	if len(os.Args) >= 2 && os.Args[2] == "--debug" {
+	if len(os.Args) > 2 && os.Args[2] == "--debug" {
 		debug = true
 	}
 
