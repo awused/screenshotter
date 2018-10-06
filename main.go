@@ -35,6 +35,7 @@ type config struct {
 	Overrides          []override
 	IgnoredParents     []string
 	CheckWindowID      bool
+	Compression        int
 	Callback           string
 }
 
@@ -74,7 +75,10 @@ func main() {
 
 	tmpFile := mkTemp()
 	appname := ""
-	convertArgs := []string{tmpFile}
+	convertArgs := []string{
+		tmpFile,
+		"-define", "png:compression-level=" + strconv.Itoa(c.Compression),
+	}
 	defer os.Remove(tmpFile)
 
 	// Take Screenshot and get application name
