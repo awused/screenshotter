@@ -74,6 +74,7 @@ func main() {
 
 	tmpFile := mkTemp()
 	appname := ""
+	convertArgs := []string{tmpFile}
 	defer os.Remove(tmpFile)
 
 	// Take Screenshot and get application name
@@ -84,8 +85,20 @@ func main() {
 	} else if os.Args[1] == "region" {
 		initXConn()
 		// TODO -- get window name at mousedown and compare to mouseup
-		screenshotRegion(tmpFile)
+		geometry := selectRegion()
+		if geometry == "" {
+			// Slop was cancelled
+			return
+		}
 		appname = getMouseWindowApplication()
+		// Faster to just screenshot the whole desktop and crop later
+		convertArgs = append(convertArgs, "-crop", geometry)
+		err := exec.Command(
+			"gnome-screenshot",
+			"-f", tmpFile).Run()
+		if err != nil {
+			panic("screenshot failed " + err.Error())
+		}
 	} else if os.Args[1] == "desktop" {
 		appname = c.Fallback
 		err := exec.Command(
@@ -94,7 +107,6 @@ func main() {
 		if err != nil {
 			panic("screenshot failed " + err.Error())
 		}
-
 	} else {
 		panic("Specify mode in [window, region, desktop]")
 	}
@@ -120,7 +132,9 @@ func main() {
 		panic(err)
 	}
 
-	err = exec.Command("convert", tmpFile, outFile).Run()
+	convertArgs = append(convertArgs, outFile)
+
+	err = exec.Command("convert", convertArgs...).Run()
 	if err != nil {
 		panic(err)
 	}
@@ -220,13 +234,19 @@ func getMouseWindowApplication() string {
 	return getTargetProcess(xproto.Window(wid))
 }
 
-func screenshotRegion(file string) {
-	err := exec.Command("gnome-screenshot",
-		"-a",
-		"-f", file).Run()
+// Slop can give us window IDs but Slop will always give the root window for
+// area selections, which is undesirable
+func selectRegion() string {
+	geometry, err := exec.Command("slop",
+		"-n",
+		"-f", "%g",
+		"-l",
+		"-c", "0,0,1,0.1").Output()
 	if err != nil {
-		panic("screenshot failed " + err.Error())
+		return ""
 	}
+
+	return string(geometry)
 }
 
 func screenshotActiveWindow(file string) {
