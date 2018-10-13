@@ -427,6 +427,12 @@ func getTargetProcess(wid xproto.Window) string {
 			}
 			prc = child
 
+			if debug {
+				fmt.Println(prc.Name())
+				fmt.Println(prc.Exe())
+				fmt.Println(prc.Cmdline())
+			}
+
 			pName, err = prc.Name()
 			if err != nil {
 				panic(err)
