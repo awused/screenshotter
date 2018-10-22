@@ -1,0 +1,67 @@
+# Used for desktop screenshots and when the window name can't be determined
+Fallback = 'desktop'
+
+# The root directory where screenshots should be stored
+# Screenshots will be named ScreenshotDir/application/timestamp.png or
+# ScreenshotDir/application/year/timestamp.png
+ScreenshotDir = '/path/to/screenshots/directory'
+
+# Any applications that get separate directories for screenshots from each
+# year. This is checked after any applicable overrides.
+YearlyApplications = ['firefox', 'mcomix', 'mpv']
+
+# Will be ignored in favour of any available children
+IgnoredParents = ['kitty', 'xfce4-terminal', 'zsh']
+
+# Comment to skip checking WINDOWID if you only use terminals that use a single
+# process per window.
+# Doesn't help with gnome-terminal, which is uniquely incapable and does not
+# set WINDOWID.
+CheckWindowID = true
+
+# Callback to be called with the path to the screenshot.
+# Callback = '/home/user/bin/screenshot-script'
+
+# PNG compression level in the range of 0-9
+# 0 is fastest, 9 is slowest
+# 8 and 9 are slow enough to be annoying for interactive usage
+# 0 compresses very poorly and saves little time over 1
+Compression = 5
+
+# Overrides. The first one with a matching name and Regex is used.
+#
+# Name: The application name to match against. Multiple overrides can be
+# specified for a name.
+#
+# Regex: Optional. If present, the full command line is matched against this
+# regular expression and the groups can be referenced in the Format.
+#
+# Format: The output pattern. Use %s to reference the groups from any regex
+# match.
+
+[[Overrides]]
+  Name = "vimx"
+  Format = "vim"
+
+[[Overrides]]
+  Name = "i3"
+  Format = "desktop"
+
+[[Overrides]]
+  Name = "chromium-browser"
+  Format = "chromium"
+
+[[Overrides]]
+  Name = "wine32-preloader"
+  Regex = '^.*/([^/ ]+)\.exe'
+  Format = "%[2]s"
+
+[[Overrides]]
+  Name = "python2-7"
+  Regex = '^/usr/bin/python.*/bin/([^/ ]+)( .*)?'
+  Format = "%[2]s"
+
+[[Overrides]]
+  Name = "watch"
+  Regex = '^watch ([^ ]*)?'
+  Format = "%[2]s"

@@ -29,7 +29,7 @@ type override struct {
 }
 
 type config struct {
-	RootDir            string
+	ScreenshotDir      string
 	Fallback           string
 	YearlyApplications []string
 	Overrides          []override
@@ -53,7 +53,7 @@ var c *config
 
 var debug = false
 
-// TODO -- urface/cli
+// TODO -- urfave/cli instead of this mess
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatal("Specify mode in [window, region, desktop]")
@@ -68,7 +68,6 @@ func main() {
 		hasWindowID = no
 	}
 
-	// TODO -- better cli arg parsing
 	if len(os.Args) > 2 && os.Args[2] == "--debug" {
 		debug = true
 	}
@@ -103,6 +102,23 @@ func main() {
 		if err != nil {
 			panic("screenshot failed " + err.Error())
 		}
+	} else if os.Args[1] == "name" {
+		debug = true // name implies --debug
+		initXConn()
+		// TODO -- get window name at mousedown and compare to mouseup
+		geometry := selectRegion()
+		if geometry == "" {
+			// Slop was cancelled
+			return
+		}
+		appname = getMouseWindowApplication()
+
+		fmt.Println("Application name: " + appname)
+		err = beeep.Notify("Application Name", appname, "")
+		if err != nil {
+			panic(err)
+		}
+		return
 	} else if os.Args[1] == "desktop" {
 		appname = c.Fallback
 		err := exec.Command(
@@ -112,7 +128,7 @@ func main() {
 			panic("screenshot failed " + err.Error())
 		}
 	} else {
-		panic("Specify mode in [window, region, desktop]")
+		panic("Specify mode in [window, region, desktop, name]")
 	}
 
 	if appname == "" {
@@ -150,7 +166,7 @@ func main() {
 		}
 	}
 
-	partPath := strings.TrimPrefix(outFile, c.RootDir)
+	partPath := strings.TrimPrefix(outFile, c.ScreenshotDir)
 
 	err = beeep.Notify("Screenshot Taken", partPath, outFile)
 	if err != nil {
@@ -159,7 +175,7 @@ func main() {
 }
 
 func getFileName(name string) string {
-	path := filepath.Join(c.RootDir, name)
+	path := filepath.Join(c.ScreenshotDir, name)
 	d := time.Now()
 
 	if contains(c.YearlyApplications, name) {
@@ -443,19 +459,4 @@ func getTargetProcess(wid xproto.Window) string {
 	}
 
 	return overrideName(name, prc)
-}
-
-func runBash(cmd string) (string, error) {
-	// See http://redsymbol.net/articles/unofficial-bash-strict-mode/
-	command := `
-		set -euo pipefail
-		IFS=$'\n\t'
-		` + cmd + "\n"
-
-	bash := exec.Command("/usr/bin/env", "bash")
-	bash.Stdin = strings.NewReader(command)
-	bash.Stderr = os.Stderr
-
-	bashOut, err := bash.Output()
-	return string(bashOut), err
 }
