@@ -283,9 +283,11 @@ func screenshotActiveWindow(file string) {
 
 var safeFilenameRegex = regexp.MustCompile(`[^\p{L}\p{N}-_+=]+`)
 var repeatedHyphens = regexp.MustCompile(`--+`)
+var extraRegex = regexp.MustCompile(`%![(]EXTRA string=.*$`)
 
 func convertApplicationName(input string) string {
-	output := strings.ToLower(input)
+	output := extraRegex.ReplaceAllString(input, "")
+	output = strings.ToLower(output)
 	output = safeFilenameRegex.ReplaceAllString(output, "-")
 	output = repeatedHyphens.ReplaceAllString(output, "-")
 	return strings.Trim(output, "-")
