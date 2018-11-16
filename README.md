@@ -6,7 +6,7 @@ A tool to take screenshots and organize them based on the name of the applicatio
 # Requirements
 
 * ImageMagick 6
-* [https://github.com/naelstrof/slop](slop)
+* [slop](https://github.com/naelstrof/slop)
 * gnome-screenshot
 * An X11 based desktop environment
     * xdotool
