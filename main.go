@@ -1,37 +1,34 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
-	"github.com/BurntSushi/xgbutil/ewmh"
-	"github.com/BurntSushi/xgbutil/xprop"
 	"github.com/awused/awconf"
 	"github.com/gen2brain/beeep"
-	"github.com/shirou/gopsutil/process"
 )
 
 type override struct {
-	Name   string
-	Regex  string
-	Format string
+	Name     string
+	Regex    string
+	Format   string
+	Yearly   bool
+	Monthly  bool
+	Delegate string
 }
 
 type config struct {
 	ScreenshotDir      string
 	Fallback           string
-	YearlyApplications []string
+	YearlyApplications *[]string
 	Overrides          []override
 	IgnoredParents     []string
 	CheckWindowID      bool
@@ -39,10 +36,16 @@ type config struct {
 	Callback           string
 }
 
+type application struct {
+	dir     string
+	yearly  bool
+	monthly bool
+}
+
 const (
-	maybe int = iota
-	no    int = iota
-	yes   int = iota
+	no int = iota
+	yes
+	maybe
 )
 
 // If _any_ have the right window ID then we must only match against those
@@ -51,6 +54,12 @@ var hasWindowID = maybe
 var xu *xgbutil.XUtil
 var c *config
 
+var appChan = make(chan application)
+var errorChan = make(chan error)
+
+var delegateEnvironment = make(map[string]string)
+
+var mode = ""
 var debug = false
 
 // TODO -- urfave/cli instead of this mess
@@ -64,6 +73,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if c.YearlyApplications != nil {
+		_ = beeep.Notify(
+			"Screenshotter Error",
+			"YearlyApplications has been removed in favour of more flexible "+
+				"Override settings. Update your config.", "")
+		os.Exit(1)
+	}
+
 	if !c.CheckWindowID {
 		hasWindowID = no
 	}
@@ -72,71 +89,75 @@ func main() {
 		debug = true
 	}
 
-	tmpFile := mkTemp()
-	appname := ""
+	tmpBMP, tmpPNG := mkTemp()
 	convertArgs := []string{
-		tmpFile,
+		tmpBMP,
 		"-define", "png:compression-level=" + strconv.Itoa(c.Compression),
 	}
-	defer os.Remove(tmpFile)
+	defer os.Remove(tmpBMP)
+	defer os.Remove(tmpPNG)
 
-	// Take Screenshot and get application name
-	if os.Args[1] == "window" {
-		initXConn()
-		appname = getActiveWindowApplication()
-		screenshotActiveWindow(tmpFile)
-	} else if os.Args[1] == "region" {
-		initXConn()
-		// TODO -- get window name at mousedown and compare to mouseup
+	initXConn()
+
+	mode = os.Args[1]
+	delegateEnvironment["SCREENSHOTTER_MODE"] = mode
+
+	switch mode {
+	case "window":
+		go getActiveWindowApplication()
+		screenshotActiveWindow(tmpBMP)
+	case "desktop":
+		go getDesktopApplicationName()
+		err := exec.Command(
+			"gnome-screenshot",
+			"-f", tmpBMP).Run()
+		if err != nil {
+			panic("screenshot failed " + err.Error())
+		}
+	case "region":
 		geometry := selectRegion()
 		if geometry == "" {
 			// Slop was cancelled
 			return
 		}
-		appname = getMouseWindowApplication()
+		delegateEnvironment["SCREENSHOTTER_GEOMETRY"] = geometry
+		go getMouseWindowApplication()
 		// Faster to just screenshot the whole desktop and crop later
 		convertArgs = append(convertArgs, "-crop", geometry)
 		err := exec.Command(
 			"gnome-screenshot",
-			"-f", tmpFile).Run()
+			"-f", tmpBMP).Run()
 		if err != nil {
 			panic("screenshot failed " + err.Error())
 		}
-	} else if os.Args[1] == "name" {
+	case "name":
 		debug = true // name implies --debug
-		initXConn()
 		// TODO -- get window name at mousedown and compare to mouseup
 		geometry := selectRegion()
 		if geometry == "" {
 			// Slop was cancelled
 			return
 		}
-		appname = getMouseWindowApplication()
+		delegateEnvironment["SCREENSHOTTER_GEOMETRY"] = geometry
+		go getMouseWindowApplication()
 
-		fmt.Println("Application name: " + appname)
-		err = beeep.Notify("Application Name", appname, "")
-		if err != nil {
+		select {
+		case app := <-appChan:
+			fmt.Println("Application Directory: " + app.dir)
+			err = beeep.Notify("Application Directory", app.dir, "")
+			if err != nil {
+				panic(err)
+			}
+		case err = <-errorChan:
 			panic(err)
 		}
 		return
-	} else if os.Args[1] == "desktop" {
-		appname = c.Fallback
-		err := exec.Command(
-			"gnome-screenshot",
-			"-f", tmpFile).Run()
-		if err != nil {
-			panic("screenshot failed " + err.Error())
-		}
-	} else {
+	default:
 		panic("Specify mode in [window, region, desktop, name]")
 	}
 
-	if appname == "" {
-		panic("Application name can't be empty, check your settings and overrides")
-	}
-
 	// Sanity check that a screenshot was taken
-	fi, err := os.Stat(tmpFile)
+	fi, err := os.Stat(tmpBMP)
 	if err != nil {
 		panic(err)
 	}
@@ -145,16 +166,33 @@ func main() {
 		return
 	}
 
-	outFile := getFileName(appname)
+	convertArgs = append(convertArgs, tmpPNG)
+
+	err = exec.Command("convert", convertArgs...).Run()
+	if err != nil {
+		panic(err)
+	}
+
+	var app application
+
+	select {
+	case app = <-appChan:
+	case err = <-errorChan:
+		panic(err)
+	}
+
+	if app.dir == "" {
+		panic("Application name can't be empty, check your settings and overrides")
+	}
+
+	outFile := getFileName(app)
 
 	err = os.MkdirAll(filepath.Dir(outFile), 0777)
 	if err != nil {
 		panic(err)
 	}
 
-	convertArgs = append(convertArgs, outFile)
-
-	err = exec.Command("convert", convertArgs...).Run()
+	err = moveFile(tmpPNG, outFile)
 	if err != nil {
 		panic(err)
 	}
@@ -174,11 +212,24 @@ func main() {
 	}
 }
 
-func getFileName(name string) string {
-	path := filepath.Join(c.ScreenshotDir, name)
+func getFileName(app application) string {
+	path := filepath.Join(c.ScreenshotDir, app.dir)
 	d := time.Now()
 
-	if contains(c.YearlyApplications, name) {
+	if app.monthly {
+		if app.yearly {
+			return filepath.Join(
+				path,
+				d.Format("2006"),
+				d.Format("01"),
+				d.Format("02_15-04-05")+".png")
+		} else {
+			return filepath.Join(
+				path,
+				d.Format("2006-01"),
+				d.Format("02_15-04-05")+".png")
+		}
+	} else if app.yearly {
 		return filepath.Join(
 			path,
 			d.Format("2006"),
@@ -200,7 +251,7 @@ func initXConn() {
 	}
 }
 
-func mkTemp() string {
+func mkTemp() (string, string) {
 	f, err := ioutil.TempFile("", "screenshotter*.bmp")
 	if err != nil {
 		panic(err)
@@ -210,48 +261,25 @@ func mkTemp() string {
 		panic(err)
 	}
 
-	n := f.Name()
+	tmpBMP := f.Name()
 
 	// Remove in Go 1.11
-	if filepath.Ext(n) != ".bmp" {
-		err = os.Rename(n, n+".bmp")
-		if err != nil {
-			panic(err)
-		}
-		n = n + ".bmp"
+	if filepath.Ext(tmpBMP) != ".bmp" {
+		panic("Screenshotter requires Go 1.11 or higher")
 	}
 
-	return n
-}
-
-func getActiveWindowApplication() string {
-	wid, err := ewmh.ActiveWindowGet(xu)
+	f, err = ioutil.TempFile("", "screenshotter*.png")
+	if err != nil {
+		panic(err)
+	}
+	err = f.Close()
 	if err != nil {
 		panic(err)
 	}
 
-	return getTargetProcess(wid)
-}
+	tmpPNG := f.Name()
 
-func getMouseWindowApplication() string {
-	out, err := exec.Command(
-		"xdotool", "getmouselocation", "--shell").Output()
-	if err != nil {
-		panic(err)
-	}
-
-	re := regexp.MustCompile("WINDOW=([0-9]+)\n")
-
-	matches := re.FindSubmatch(out)
-	if matches == nil {
-		return "desktop"
-	}
-
-	wid, err := strconv.Atoi(string(matches[1]))
-	if err != nil {
-		panic(err)
-	}
-	return getTargetProcess(xproto.Window(wid))
+	return tmpBMP, tmpPNG
 }
 
 // Slop can give us window IDs but Slop will always give the root window for
@@ -281,184 +309,17 @@ func screenshotActiveWindow(file string) {
 	}
 }
 
-var safeFilenameRegex = regexp.MustCompile(`[^\p{L}\p{N}-_+=]+`)
-var repeatedHyphens = regexp.MustCompile(`--+`)
-var extraRegex = regexp.MustCompile(`%![(]EXTRA string=.*$`)
-
-func convertApplicationName(input string) string {
-	output := extraRegex.ReplaceAllString(input, "")
-	output = strings.ToLower(output)
-	output = safeFilenameRegex.ReplaceAllString(output, "-")
-	output = repeatedHyphens.ReplaceAllString(output, "-")
-	return strings.Trim(output, "-")
-}
-
-// Naive linear search, fine for small numbers of items
-// User would have to add tens of thousands of items to their configs for this
-// to be noticeable
-func contains(ss []string, s string) bool {
-	for _, st := range ss {
-		if st == s {
-			return true
-		}
-	}
-	return false
-}
-
-func procInWindow(p *process.Process, wid xproto.Window) bool {
-	path := "/proc/" + strconv.Itoa(int(p.Pid)) + "/environ"
-
-	env, err := ioutil.ReadFile(path)
+func moveFile(inFile string, outFile string) error {
+	err := os.Rename(inFile, outFile)
 	if err != nil {
-		return false
+		// Probably a cross-device link or other error from os.Rename
+		err = exec.Command("mv", inFile, outFile).Run()
 	}
 
-	return bytes.Contains(env, []byte("WINDOWID="+strconv.Itoa(int(wid))))
-}
-
-func youngestChild(p *process.Process, wid xproto.Window) *process.Process {
-	children, err := p.Children()
-	if err != nil && err != process.ErrorNoChildren {
-		panic(err)
-	}
-
-	if len(children) == 0 {
-		return nil
-	}
-
-	var child *process.Process
-	var childtime int64
-
-	for _, c := range children {
-		if hasWindowID != no {
-			if procInWindow(c, wid) {
-				if hasWindowID != yes {
-					hasWindowID = yes
-					child = nil
-				}
-			} else if hasWindowID == yes {
-				continue
-			}
-		}
-
-		ctime, err := c.CreateTime()
-		if err != nil {
-			panic(err)
-		}
-
-		if child == nil || ctime > childtime {
-			child, childtime = c, ctime
-		}
-	}
-
-	if hasWindowID == maybe {
-		// We didn't encounter any children with the WINDOWID so stop checking.
-		hasWindowID = no
-	}
-	return child
-}
-
-// p can be nil
-func overrideName(name string, p *process.Process) string {
-	for _, o := range c.Overrides {
-		// TODO -- check regex match
-		if o.Name != name {
-			continue
-		}
-
-		format := o.Format
-		if p != nil && o.Regex != "" {
-			re := regexp.MustCompile(o.Regex)
-
-			cmdline, err := p.Cmdline()
-			if err != nil {
-				panic(err)
-			}
-			matches := re.FindStringSubmatch(cmdline)
-			if matches == nil {
-				continue
-			}
-			var interfaces []interface{} = make([]interface{}, len(matches))
-			for i, m := range matches {
-				interfaces[i] = m
-			}
-			format = fmt.Sprintf(format, interfaces...)
-
-			if debug {
-				fmt.Println(matches)
-				fmt.Println(format)
-			}
-		}
-
-		fName := convertApplicationName(format)
-
-		if fName != "" {
-			return fName
-		}
-	}
-	return name
-}
-
-func getTargetProcess(wid xproto.Window) string {
-	var name string
-	var prc *process.Process
-
-	pid, err := ewmh.WmPidGet(xu, wid)
 	if err != nil {
-		// No PID -> get window name
-		name, err = ewmh.WmNameGet(xu, wid)
-		if name == "" {
-			// No _NET_WM_NAME -> get WM_NAME
-			name, err = xprop.PropValStr(xprop.GetProperty(xu, wid, "WM_NAME"))
-		}
-
-		if err != nil {
-			// No window name -> probably root window
-			return convertApplicationName(c.Fallback)
-		}
-
-		name = convertApplicationName(name)
-	} else {
-		prc, err = process.NewProcess(int32(pid))
-		if err != nil {
-			panic(err)
-		}
-
-		if debug {
-			fmt.Println(prc.Name())
-			fmt.Println(prc.Exe())
-			fmt.Println(prc.Cmdline())
-		}
-
-		// Name() can include flags and arguments
-		pName, err := prc.Exe()
-		if err != nil {
-			panic(err)
-		}
-
-		name = convertApplicationName(filepath.Base(pName))
-
-		for contains(c.IgnoredParents, name) {
-			child := youngestChild(prc, wid)
-			if child == nil {
-				break
-			}
-			prc = child
-
-			if debug {
-				fmt.Println(prc.Name())
-				fmt.Println(prc.Exe())
-				fmt.Println(prc.Cmdline())
-			}
-
-			pName, err = prc.Name()
-			if err != nil {
-				panic(err)
-			}
-
-			name = convertApplicationName(filepath.Base(pName))
-		}
+		return err
 	}
 
-	return overrideName(name, prc)
+	// Set some sane permissions
+	return os.Chmod(outFile, 0664)
 }

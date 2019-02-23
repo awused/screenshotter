@@ -1,14 +1,10 @@
-# Used for desktop screenshots and when the window name can't be determined
+# Used for desktop screenshots and when the window PID can't be determined
 Fallback = 'desktop'
 
 # The root directory where screenshots should be stored
 # Screenshots will be named ScreenshotDir/application/timestamp.png or
 # ScreenshotDir/application/year/timestamp.png
 ScreenshotDir = '/path/to/screenshots/directory'
-
-# Any applications that get separate directories for screenshots from each
-# year. This is checked after any applicable overrides.
-YearlyApplications = ['firefox', 'mcomix', 'mpv']
 
 # Will be ignored in favour of any available children
 IgnoredParents = ['kitty', 'xfce4-terminal', 'zsh']
@@ -28,16 +24,43 @@ CheckWindowID = true
 # 0 compresses very poorly and saves little time over 1
 Compression = 5
 
-# Overrides. The first one with a matching name and Regex is used.
+# Overrides.
+# The first matching override is used. In order for an override to match
+# the Name, Regex, and Delegate are considered in that order.
 #
-# Name: The application name to match against. Multiple overrides can be
+#
+# Name: Optional string.
+# The application name to match against. Multiple overrides can be
 # specified for a name.
 #
-# Regex: Optional. If present, the full command line is matched against this
-# regular expression and the groups can be referenced in the Format.
+# Regex: Optional regular expression.
+# If present, the full command line is matched against this
+# regular expression and the groups can be referenced in the Format string.
+# Will never match in desktop mode or when the process in a window can't be
+# determined.
 #
-# Format: The output pattern. Use %s to reference the groups from any regex
-# match.
+# Yearly: Optional boolean.
+# If present and true separate directories will be used
+#
+# Monthly: Optional boolean.
+# If present and true, use separate directories for each
+# month. If Yearly is true the directories will be nested (appname/2019/02/),
+# but false or absent will result in a flatter structure (appname/2019-02/).
+#
+# Format: Optional printf style format string.
+# The output pattern as a format string. Use %s to
+# reference the groups from the regex match, if present. All special
+# characters will be escaped, and this cannot be used to specify nested
+# directories.
+#
+# Delegate: Optional executable.
+# If present this executable is invoked with several environment variables set,
+# see the README for the set of variables.
+# A non-zero exit value is treated as a non-match.
+# Each line of stdout is treated as a directory on a path rooted at
+# ScreenshotDir. If the output is non-empty it will override any value from
+# Format.
+#
 
 [[Overrides]]
   Name = "vimx"
@@ -65,3 +88,16 @@ Compression = 5
   Name = "watch"
   Regex = '^watch ([^ ]*)?'
   Format = "%[2]s"
+
+[[Overrides]]
+  Name = "firefox"
+  Yearly = true
+
+[[Overrides]]
+  Name = "mcomix"
+  Yearly = true
+
+[[Overrides]]
+  Name = "mpv"
+  Yearly = true
+
