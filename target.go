@@ -195,6 +195,8 @@ func getTargetApplication(wid xproto.Window) error {
 			return err
 		}
 
+		// This could be undesirable if the executable does end with " (deleted)"
+		pName = strings.TrimSuffix(pName, " (deleted)")
 		name = convertApplicationName(filepath.Base(pName))
 
 		for contains(c.IgnoredParents, name) {
@@ -218,6 +220,7 @@ func getTargetApplication(wid xproto.Window) error {
 				return err
 			}
 
+			pName = strings.TrimSuffix(pName, " (deleted)")
 			name = convertApplicationName(filepath.Base(pName))
 		}
 
@@ -292,13 +295,13 @@ func overrideApplication(name string, p *process.Process) error {
 	for _, o := range c.Overrides {
 		delegateEnvironment["SCREENSHOTTER_NAME"] = name
 
-		if o.Name != "" && o.Name != name {
-			continue
-		}
-
 		var matches []string
 		delegateName := ""
 		fName := ""
+
+		if o.Name != "" && o.Name != name {
+			continue
+		}
 
 		if o.Regex != "" {
 			if p == nil {
@@ -325,6 +328,10 @@ func overrideApplication(name string, p *process.Process) error {
 			fName = fmt.Sprintf(o.Format, interfaces...)
 
 			fName = convertApplicationName(fName)
+
+			if fName != "" {
+				delegateEnvironment["SCREENSHOTTER_NAME"] = fName
+			}
 		}
 
 		if o.Delegate != "" {

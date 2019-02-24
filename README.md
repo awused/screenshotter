@@ -64,9 +64,7 @@ The format of the geometry will use the X11 geometry format: [{WIDTH}][x{HEIGHT}
 
 # Limitations
 
-The selection logic for determining which application is running in a window looks for the most recently spawned child process, which is not guaranteed to be the visible application in a terminal or shell.
-
-The application logic does not currently work at all with terminal multiplexers like tmux or screen and it can't tell which application is being run in the active pane. With work I believe tmux support can be added but it hasn't been a priority.
+The selection logic for determining which application is running in a window looks for the most recently spawned child process, which is not guaranteed to be the visible application in a terminal or shell. Delegates can be used solve this problem in some cases.
 
 If selecting a region spanning multiple visible windows the application will be based on the window under the mouse cursor when the user ends their selection. In the future this might be made smarter, to check if more than one application is visible in the screenshot and use the configurable fallback name, but this naive approach happens to match the behaviour of sharex.
 
