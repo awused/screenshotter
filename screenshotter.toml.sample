@@ -16,6 +16,8 @@ IgnoredParents = ['kitty', 'xfce4-terminal', 'zsh']
 CheckWindowID = true
 
 # Callback to be called with the path to the screenshot.
+# The final filename will be the first argument and several environment
+# variables will be set. See the README for details.
 # Callback = '/home/user/bin/screenshot-script'
 
 # PNG compression level in the range of 0-9

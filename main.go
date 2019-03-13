@@ -198,7 +198,13 @@ func main() {
 	}
 
 	if c.Callback != "" {
-		err = exec.Command(c.Callback, outFile).Run()
+		cmd := exec.Command(c.Callback, outFile)
+		cmd.Env = os.Environ()
+		for k, v := range delegateEnvironment {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+
+		err = cmd.Run()
 		if err != nil {
 			fmt.Println("Callback %s returned failed: %s", c.Callback, err)
 		}
