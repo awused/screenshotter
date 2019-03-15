@@ -291,9 +291,12 @@ func overrideApplication(name string, p *process.Process) error {
 	}
 
 	app := application{dir: name}
+	delegateEnvironment["SCREENSHOTTER_NAME"] = name
+	delegateEnvironment["SCREENSHOTTER_DIR"] = name
 
 	for _, o := range c.Overrides {
 		delegateEnvironment["SCREENSHOTTER_NAME"] = name
+		delegateEnvironment["SCREENSHOTTER_DIR"] = name
 
 		var matches []string
 		delegateName := ""
@@ -331,6 +334,7 @@ func overrideApplication(name string, p *process.Process) error {
 
 			if fName != "" {
 				delegateEnvironment["SCREENSHOTTER_NAME"] = fName
+				delegateEnvironment["SCREENSHOTTER_DIR"] = fName
 			}
 		}
 
@@ -340,10 +344,11 @@ func overrideApplication(name string, p *process.Process) error {
 				continue
 			}
 			delegateName = output
+			delegateEnvironment["SCREENSHOTTER_DIR"] = output
 		}
 
 		if debug {
-			fmt.Printf("Matching Override: %+v\n", o)
+			fmt.Printf("Matching override: %+v\n", o)
 		}
 
 		app.yearly = o.Yearly
@@ -363,9 +368,15 @@ func overrideApplication(name string, p *process.Process) error {
 }
 
 func runDelegate(delegate string) (string, bool) {
+	if debug {
+		fmt.Printf("Calling delegate [%s] with environment:\n", delegate)
+	}
 	cmd := exec.Command(delegate)
 	cmd.Env = os.Environ()
 	for k, v := range delegateEnvironment {
+		if debug {
+			fmt.Println(k + "=" + v)
+		}
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 
@@ -376,7 +387,7 @@ func runDelegate(delegate string) (string, bool) {
 
 	out := string(stdout)
 	if debug {
-		fmt.Println("Raw delegate output\n" + out)
+		fmt.Println("Raw delegate output:\n" + out)
 	}
 
 	dirs := make([]string, 0)

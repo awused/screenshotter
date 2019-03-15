@@ -43,7 +43,7 @@ Use `Yearly` and `Monthly` to configure separate subfolders.
 
 ### Delegates
 
-Specify a program using `Delegate` inside an Override block to delegate directory naming to another program or script for a particular program. `Delegate` cannot be specified at the same time as `Format`
+Specify a program using `Delegate` inside an Override block to delegate directory naming to another program or script for a particular program.
 
 A delegate that exits with a non-zero status will be ignored and the next matching override will be attempted.
 
@@ -53,6 +53,7 @@ Environment Variable | Explanation
 -------------------- | ----------
 SCREENSHOTTER_MODE | The mode used when calling screenshotter.
 SCREENSHOTTER_NAME | The name screenshotter determined for the application, including any format strings from overrides.
+SCREENSHOTTER_DIR | The directory name determined for the applications. For delegates this is the same as the name, for callbacks this reflects the output of any delegates but not whether it uses yearly/monthly directories.
 SCREENSHOTTER_WINDOWID | The Window ID of the Window used to determine the active process.
 SCREENSHOTTER_PID | The PID of the process that matched this Override. May not be present.
 SCREENSHOTTER_MOUSEX | The X coordinate of the cursor when the screenshot was taken.

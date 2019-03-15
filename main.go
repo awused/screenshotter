@@ -143,7 +143,16 @@ func main() {
 
 		select {
 		case app := <-appChan:
-			fmt.Println("Application Directory: " + app.dir)
+			fmt.Println("Application directory: " + app.dir)
+			fmt.Println("File name: " + getFileName(app))
+			if c.Callback != "" {
+				fmt.Printf("Would call callback [%s] with environment:\n", c.Callback)
+
+				for k, v := range delegateEnvironment {
+					fmt.Println(k + "=" + v)
+				}
+			}
+
 			err = beeep.Notify("Application Directory", app.dir, "")
 			if err != nil {
 				panic(err)
@@ -187,6 +196,11 @@ func main() {
 
 	outFile := getFileName(app)
 
+	if debug {
+		fmt.Println("Application directory: " + app.dir)
+		fmt.Println("File name: " + outFile)
+	}
+
 	err = os.MkdirAll(filepath.Dir(outFile), 0777)
 	if err != nil {
 		panic(err)
@@ -198,15 +212,21 @@ func main() {
 	}
 
 	if c.Callback != "" {
+		if debug {
+			fmt.Printf("Calling callback [%s] with environment:\n", c.Callback)
+		}
 		cmd := exec.Command(c.Callback, outFile)
 		cmd.Env = os.Environ()
 		for k, v := range delegateEnvironment {
+			if debug {
+				fmt.Println(k + "=" + v)
+			}
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 
 		err = cmd.Run()
 		if err != nil {
-			fmt.Println("Callback %s returned failed: %s", c.Callback, err)
+			fmt.Println("Callback [%s] failed: %s", c.Callback, err)
 		}
 	}
 
