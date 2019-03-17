@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -64,7 +65,9 @@ var debug = false
 
 // TODO -- urfave/cli instead of this mess
 func main() {
-	if len(os.Args) < 2 {
+	flag.BoolVar(&debug, "debug", false, "Enable debugging output")
+	flag.Parse()
+	if flag.NArg() == 0 {
 		log.Fatal("Specify mode in [window, region, desktop]")
 	}
 
@@ -85,10 +88,6 @@ func main() {
 		hasWindowID = no
 	}
 
-	if len(os.Args) > 2 && os.Args[2] == "--debug" {
-		debug = true
-	}
-
 	tmpBMP, tmpPNG := mkTemp()
 	convertArgs := []string{
 		tmpBMP,
@@ -99,7 +98,7 @@ func main() {
 
 	initXConn()
 
-	mode = os.Args[1]
+	mode = flag.Arg(0)
 	delegateEnvironment["SCREENSHOTTER_MODE"] = mode
 
 	switch mode {
@@ -131,7 +130,7 @@ func main() {
 			panic("screenshot failed " + err.Error())
 		}
 	case "name":
-		debug = true // name implies --debug
+		debug = true // name implies debug
 		// TODO -- get window name at mousedown and compare to mouseup
 		geometry := selectRegion()
 		if geometry == "" {

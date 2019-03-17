@@ -37,7 +37,7 @@ Any program specified with `Callback` will be run after the screenshot has been 
 
 ## Overrides
 
-Use Overrides when you want to manipulate how the directories are named for an application. In the simple cases you might want "chromium-browser" to instead be "chromium" or "vimx" to be "vim." In the more complicated cases you can use regular expressions and matching groups to change "python my-application.py" into  "my-application." Use the `--debug` flag or the `name` command to assist with editing these.
+Use Overrides when you want to manipulate how the directories are named for an application. In the simple cases you might want "chromium-browser" to instead be "chromium" or "vimx" to be "vim." In the more complicated cases you can use regular expressions and matching groups to change "python my-application.py" into  "my-application." Use the `-debug` flag or the `name` command to assist with editing these.
 
 Use `Yearly` and `Monthly` to configure separate subfolders.
 
