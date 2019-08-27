@@ -225,7 +225,7 @@ func main() {
 
 		err = cmd.Run()
 		if err != nil {
-			fmt.Println("Callback [%s] failed: %s", c.Callback, err)
+			fmt.Printf("Callback [%s] failed: %s\n", c.Callback, err)
 		}
 	}
 
