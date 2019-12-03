@@ -381,13 +381,13 @@ func runDelegate(delegate string) (string, bool) {
 	}
 
 	stdout, err := cmd.Output()
-	if err != nil {
-		return "", false
+	out := string(stdout)
+	if debug && out != "" {
+		fmt.Println("Raw delegate output:\n" + out)
 	}
 
-	out := string(stdout)
-	if debug {
-		fmt.Println("Raw delegate output:\n" + out)
+	if err != nil {
+		return "", false
 	}
 
 	dirs := make([]string, 0)
