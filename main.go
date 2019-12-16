@@ -24,6 +24,7 @@ type override struct {
 	Yearly   bool
 	Monthly  bool
 	Delegate string
+	Callback string
 }
 
 type config struct {
@@ -38,9 +39,10 @@ type config struct {
 }
 
 type application struct {
-	dir     string
-	yearly  bool
-	monthly bool
+	dir      string
+	yearly   bool
+	monthly  bool
+	callback string
 }
 
 const (
@@ -208,6 +210,26 @@ func main() {
 	err = moveFile(tmpPNG, outFile)
 	if err != nil {
 		panic(err)
+	}
+
+	if app.callback != "" {
+		if debug {
+			fmt.Printf("Calling override callback [%s] with environment:\n",
+				app.callback)
+		}
+		cmd := exec.Command(app.callback, outFile)
+		cmd.Env = os.Environ()
+		for k, v := range delegateEnvironment {
+			if debug {
+				fmt.Println(k + "=" + v)
+			}
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+
+		err = cmd.Run()
+		if err != nil {
+			fmt.Printf("Override callback [%s] failed: %s\n", app.callback, err)
+		}
 	}
 
 	if c.Callback != "" {

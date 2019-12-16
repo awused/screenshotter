@@ -56,7 +56,14 @@ Compression = 5
 # directories.
 #
 # Delegate: Optional executable.
-# If present this executable is invoked with several environment variables set,
+# If present this executable is invoked with several environment variables set.
+#
+# Callback: Optional executable.
+# If present, called before the global callback with the same arguments.
+# Screenshotter makes the assumption that this callback does NOT rename or move
+# the screenshot.
+# This is not considered when matching overrides.
+
 # see the README for the set of variables.
 # A non-zero exit value is treated as a non-match.
 # Each line of stdout is treated as a directory on a path rooted at
@@ -102,4 +109,5 @@ Compression = 5
 [[Overrides]]
   Name = "mpv"
   Yearly = true
+  # Callback = '/home/user/bin/mpv-callback'
 

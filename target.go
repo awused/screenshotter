@@ -353,6 +353,7 @@ func overrideApplication(name string, p *process.Process) error {
 
 		app.yearly = o.Yearly
 		app.monthly = o.Monthly
+		app.callback = o.Callback
 
 		if delegateName != "" {
 			app.dir = delegateName
