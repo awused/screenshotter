@@ -387,6 +387,10 @@ func runDelegate(delegate string) (string, bool) {
 	}
 
 	if err != nil {
+		if debug {
+			fmt.Println("Delegate exited with error: " + err.Error())
+		}
+
 		return "", false
 	}
 
