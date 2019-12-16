@@ -58,18 +58,18 @@ Compression = 5
 # Delegate: Optional executable.
 # If present this executable is invoked with several environment variables set.
 #
+# See the README for the set of variables.
+# A non-zero exit value is treated as a non-match.
+# Each line of stdout is treated as a directory on a path rooted at
+# ScreenshotDir. If the output is non-empty it will override any value from
+# Format.
+#
 # Callback: Optional executable.
 # If present, called before the global callback with the same arguments.
 # Screenshotter makes the assumption that this callback does NOT rename or move
 # the screenshot.
 # This is not considered when matching overrides.
 
-# see the README for the set of variables.
-# A non-zero exit value is treated as a non-match.
-# Each line of stdout is treated as a directory on a path rooted at
-# ScreenshotDir. If the output is non-empty it will override any value from
-# Format.
-#
 
 [[Overrides]]
   Name = "vimx"
