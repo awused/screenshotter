@@ -21,14 +21,8 @@ import (
 
 var noWindowError = errors.New("No window under mouse")
 
-func getActiveWindowApplication() {
-	wid, err := ewmh.ActiveWindowGet(xu)
-	if err != nil {
-		errorChan <- err
-		return
-	}
-
-	err = setDelegateVariablesForFullWindow(wid)
+func getActiveWindowApplication(wid xproto.Window) {
+	err := setDelegateVariablesForFullWindow(wid)
 	if err != nil {
 		errorChan <- err
 		return

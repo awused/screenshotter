@@ -8,7 +8,7 @@ A tool to take screenshots and organize them based on the name of the applicatio
 * Go 1.11 or newer
 * ImageMagick 6
 * [slop](https://github.com/naelstrof/slop)
-* gnome-screenshot
+* [maim](https://github.com/naelstrof/maim)
 * An X11 based desktop environment
     * xdotool
 * Any terminal emulator except gnome-terminal
@@ -33,7 +33,7 @@ Use IgnoredParents to cover the cases where you've started vim from zsh running 
 
 When running terminals that share processes between windows (xfce4-terminal, gnome-terminal, etc) CheckWindowID must be set to true.
 
-Any program specified with `Callback` will be run after the screenshot has been taken. The filename will be supplied as the first argument and the same environment variables as for delegates (see below) will be set. 
+Any program specified with `Callback` will be run after the screenshot has been taken. The filename will be supplied as the first argument and the same environment variables as for delegates (see below) will be set.
 
 ## Overrides
 

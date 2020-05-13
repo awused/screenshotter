@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/xgbutil"
+	"github.com/BurntSushi/xgbutil/ewmh"
 	"github.com/awused/awconf"
 	"github.com/gen2brain/beeep"
 )
@@ -90,13 +91,16 @@ func main() {
 		hasWindowID = no
 	}
 
-	tmpBMP, tmpPNG := mkTemp()
-	convertArgs := []string{
-		tmpBMP,
-		"-define", "png:compression-level=" + strconv.Itoa(c.Compression),
+	// It'd be slightly faster to connect maim and imagemagick using pipes but
+	// not worth the complexity.
+	tmpPNG1, tmpPNG2 := mkTemp()
+	screenshotArgs := []string{
+		"--capturebackground",
+		"--hidecursor",
+		"--quality", "1", // Slow, but as good as we can manage
 	}
-	defer os.Remove(tmpBMP)
-	defer os.Remove(tmpPNG)
+	defer os.Remove(tmpPNG1)
+	defer os.Remove(tmpPNG2)
 
 	initXConn()
 
@@ -105,16 +109,19 @@ func main() {
 
 	switch mode {
 	case "window":
-		go getActiveWindowApplication()
-		screenshotActiveWindow(tmpBMP)
+		wid, err := ewmh.ActiveWindowGet(xu)
+		if err != nil {
+			errorChan <- err
+			return
+		}
+
+		go getActiveWindowApplication(wid)
+		screenshotArgs = append(
+			screenshotArgs,
+			"--window", strconv.Itoa(int(wid)),
+		)
 	case "desktop":
 		go getDesktopApplicationName()
-		err := exec.Command(
-			"gnome-screenshot",
-			"-f", tmpBMP).Run()
-		if err != nil {
-			panic("screenshot failed " + err.Error())
-		}
 	case "region":
 		geometry := selectRegion()
 		if geometry == "" {
@@ -123,14 +130,10 @@ func main() {
 		}
 		delegateEnvironment["SCREENSHOTTER_GEOMETRY"] = geometry
 		go getMouseWindowApplication()
-		// Faster to just screenshot the whole desktop and crop later
-		convertArgs = append(convertArgs, "-crop", geometry)
-		err := exec.Command(
-			"gnome-screenshot",
-			"-f", tmpBMP).Run()
-		if err != nil {
-			panic("screenshot failed " + err.Error())
-		}
+		screenshotArgs = append(
+			screenshotArgs,
+			"--geometry", geometry,
+		)
 	case "name":
 		debug = true // name implies debug
 		// TODO -- get window name at mousedown and compare to mouseup
@@ -163,20 +166,24 @@ func main() {
 		}
 		return
 	default:
-		panic("Specify mode in [window, region, desktop, name]")
-	}
-
-	// Sanity check that a screenshot was taken
-	fi, err := os.Stat(tmpBMP)
-	if err != nil {
-		panic(err)
-	}
-	if fi.Size() == 0 {
-		fmt.Println("No Screenshot was taken")
+		fmt.Println("Specify mode in [window, region, desktop, name]")
 		return
 	}
 
-	convertArgs = append(convertArgs, tmpPNG)
+	screenshotArgs = append(screenshotArgs, tmpPNG1)
+
+	err = exec.Command("maim", screenshotArgs...).Run()
+	if err != nil {
+		panic(err)
+	}
+
+	convertArgs := []string{
+		tmpPNG1,
+		"-background", "black",
+		"-alpha", "off",
+		"-define", "png:compression-level=" + strconv.Itoa(c.Compression),
+		tmpPNG2,
+	}
 
 	err = exec.Command("convert", convertArgs...).Run()
 	if err != nil {
@@ -207,7 +214,7 @@ func main() {
 		panic(err)
 	}
 
-	err = moveFile(tmpPNG, outFile)
+	err = moveFile(tmpPNG2, outFile)
 	if err != nil {
 		panic(err)
 	}
@@ -299,7 +306,7 @@ func initXConn() {
 }
 
 func mkTemp() (string, string) {
-	f, err := ioutil.TempFile("", "screenshotter*.bmp")
+	f, err := ioutil.TempFile("", "screenshotter*.png")
 	if err != nil {
 		panic(err)
 	}
@@ -308,10 +315,10 @@ func mkTemp() (string, string) {
 		panic(err)
 	}
 
-	tmpBMP := f.Name()
+	tmpPNG1 := f.Name()
 
 	// Remove in Go 1.11
-	if filepath.Ext(tmpBMP) != ".bmp" {
+	if filepath.Ext(tmpPNG1) != ".png" {
 		panic("Screenshotter requires Go 1.11 or higher")
 	}
 
@@ -324,9 +331,9 @@ func mkTemp() (string, string) {
 		panic(err)
 	}
 
-	tmpPNG := f.Name()
+	tmpPNG2 := f.Name()
 
-	return tmpBMP, tmpPNG
+	return tmpPNG1, tmpPNG2
 }
 
 // Slop can give us window IDs but Slop will always give the root window for
@@ -342,18 +349,6 @@ func selectRegion() string {
 	}
 
 	return string(geometry)
-}
-
-func screenshotActiveWindow(file string) {
-	// scrot can't do a single window, import -window misses compositor effects
-	// gnome-screenshot should even work on wayland
-	err := exec.Command("gnome-screenshot",
-		"-w",
-		"-B",
-		"-f", file).Run()
-	if err != nil {
-		panic("screenshot failed " + err.Error())
-	}
 }
 
 func moveFile(inFile string, outFile string) error {
