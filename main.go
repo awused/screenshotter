@@ -36,6 +36,7 @@ type config struct {
 	IgnoredParents     []string
 	CheckWindowID      bool
 	Compression        int
+	SlopShaders        []string
 	Callback           string
 }
 
@@ -339,11 +340,20 @@ func mkTemp() (string, string) {
 // Slop can give us window IDs but Slop will always give the root window for
 // area selections, which is undesirable
 func selectRegion() string {
-	geometry, err := exec.Command("slop",
+	slopArgs := []string{
 		"-n",
 		"-f", "%g",
 		"-l",
-		"-c", "0,0,1,0.1").Output()
+		"-c", "0,0,1,0.1",
+	}
+
+	if len(c.SlopShaders) > 0 {
+		slopArgs = append(
+			slopArgs,
+			"-r", strings.Join(c.SlopShaders, ","))
+	}
+
+	geometry, err := exec.Command("slop", slopArgs...).Output()
 	if err != nil {
 		return ""
 	}

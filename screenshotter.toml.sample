@@ -26,6 +26,10 @@ CheckWindowID = true
 # 0 compresses very poorly and saves little time over 1
 Compression = 5
 
+# Additional shaders to use with slop for region selection.
+# See https://github.com/naelstrof/slop/tree/master/shaderexamples
+# SlopShaders = ['boxzoom']
+
 # Overrides.
 # The first matching override is used. In order for an override to match
 # the Name, Regex, and Delegate are considered in that order.
