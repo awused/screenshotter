@@ -9,6 +9,8 @@ A tool to take screenshots and organize them based on the name of the applicatio
 * ImageMagick 6
 * [slop](https://github.com/naelstrof/slop)
 * [maim](https://github.com/naelstrof/maim)
+    * Requires a version with support for BMP images.
+    * As of the time of this writing the most recent tagged release does not support BMP.
 * An X11 based desktop environment
     * xdotool
 * Any terminal emulator except gnome-terminal

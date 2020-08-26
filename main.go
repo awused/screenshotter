@@ -94,14 +94,14 @@ func main() {
 
 	// It'd be slightly faster to connect maim and imagemagick using pipes but
 	// not worth the complexity.
-	tmpPNG1, tmpPNG2 := mkTemp()
+	tmpBMP, tmpPNG := mkTemp()
 	screenshotArgs := []string{
 		"--capturebackground",
 		"--hidecursor",
 		"--quality", "1", // Slow, but as good as we can manage
 	}
-	defer os.Remove(tmpPNG1)
-	defer os.Remove(tmpPNG2)
+	defer os.Remove(tmpBMP)
+	defer os.Remove(tmpPNG)
 
 	initXConn()
 
@@ -171,7 +171,7 @@ func main() {
 		return
 	}
 
-	screenshotArgs = append(screenshotArgs, tmpPNG1)
+	screenshotArgs = append(screenshotArgs, tmpBMP)
 
 	err = exec.Command("maim", screenshotArgs...).Run()
 	if err != nil {
@@ -179,11 +179,11 @@ func main() {
 	}
 
 	convertArgs := []string{
-		tmpPNG1,
+		tmpBMP,
 		"-background", "black",
 		"-alpha", "off",
 		"-define", "png:compression-level=" + strconv.Itoa(c.Compression),
-		tmpPNG2,
+		tmpPNG,
 	}
 
 	err = exec.Command("convert", convertArgs...).Run()
@@ -215,7 +215,7 @@ func main() {
 		panic(err)
 	}
 
-	err = moveFile(tmpPNG2, outFile)
+	err = moveFile(tmpPNG, outFile)
 	if err != nil {
 		panic(err)
 	}
@@ -307,7 +307,7 @@ func initXConn() {
 }
 
 func mkTemp() (string, string) {
-	f, err := ioutil.TempFile("", "screenshotter*.png")
+	f, err := ioutil.TempFile("", "screenshotter*.bmp")
 	if err != nil {
 		panic(err)
 	}
@@ -316,10 +316,10 @@ func mkTemp() (string, string) {
 		panic(err)
 	}
 
-	tmpPNG1 := f.Name()
+	tmpBMP := f.Name()
 
 	// Remove in Go 1.11
-	if filepath.Ext(tmpPNG1) != ".png" {
+	if filepath.Ext(tmpBMP) != ".bmp" {
 		panic("Screenshotter requires Go 1.11 or higher")
 	}
 
@@ -332,9 +332,9 @@ func mkTemp() (string, string) {
 		panic(err)
 	}
 
-	tmpPNG2 := f.Name()
+	tmpPNG := f.Name()
 
-	return tmpPNG1, tmpPNG2
+	return tmpBMP, tmpPNG
 }
 
 // Slop can give us window IDs but Slop will always give the root window for
