@@ -221,6 +221,10 @@ func getTargetApplication(wid xproto.Window) error {
 		delegateEnvironment["SCREENSHOTTER_PID"] = strconv.Itoa(int(prc.Pid))
 	}
 
+	if name == "" {
+		name = convertApplicationName(c.Fallback)
+	}
+
 	return overrideApplication(name, prc)
 }
 
