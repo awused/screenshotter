@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ type config struct {
 	Compression        int
 	SlopShaders        []string
 	Callback           string
+	MouseKeys          bool
 }
 
 type application struct {
@@ -340,6 +342,23 @@ func mkTemp() (string, string) {
 // Slop can give us window IDs but Slop will always give the root window for
 // area selections, which is undesirable
 func selectRegion() string {
+	if c.MouseKeys {
+		xsetOut, err := exec.Command("xset", "q").Output()
+		if err != nil {
+			return ""
+		}
+
+		disabled, err := regexp.Match("Mouse Keys: +off", xsetOut)
+
+		if disabled {
+			err = exec.Command("xset", "led", "named", "Mouse Keys").Run()
+			if err != nil {
+				return ""
+			}
+			defer exec.Command("xset", "-led", "named", "Mouse Keys").Run()
+		}
+	}
+
 	slopArgs := []string{
 		"-n",
 		"-f", "%g",

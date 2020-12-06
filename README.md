@@ -37,6 +37,8 @@ When running terminals that share processes between windows (xfce4-terminal, gno
 
 Any program specified with `Callback` will be run after the screenshot has been taken. The filename will be supplied as the first argument and the same environment variables as for delegates (see below) will be set.
 
+MouseKeys will turn [Mouse Keys](https://en.wikipedia.org/wiki/Mouse_keys) on and off when selecting a region if it isn't already enabled.
+
 ## Overrides
 
 Use Overrides when you want to manipulate how the directories are named for an application. In the simple cases you might want "chromium-browser" to instead be "chromium" or "vimx" to be "vim." In the more complicated cases you can use regular expressions and matching groups to change "python my-application.py" into  "my-application." Use the `-debug` flag or the `name` command to assist with editing these.
