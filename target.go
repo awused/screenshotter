@@ -178,7 +178,7 @@ func getTargetApplication(wid xproto.Window) error {
 		}
 
 		if debug {
-			// fmt.Println("Name: " + fmt.Sprint(prc.Name()))
+			fmt.Println("Name: " + fmt.Sprint(prc.Name()))
 			fmt.Println("Executable: " + fmt.Sprint(prc.Exe()))
 			fmt.Println("Command Line: " + fmt.Sprint(prc.Cmdline()))
 		}
@@ -186,7 +186,8 @@ func getTargetApplication(wid xproto.Window) error {
 		// Name() can include flags and arguments
 		pName, err := prc.Exe()
 		if err != nil {
-			return err
+			// Failed to read the link, fall back to Name() which can include flags
+			pName, err = prc.Name()
 		}
 
 		// This could be undesirable if the executable does end with " (deleted)"
@@ -204,14 +205,15 @@ func getTargetApplication(wid xproto.Window) error {
 			prc = child
 
 			if debug {
-				// fmt.Println("Name: " + fmt.Sprint(prc.Name()))
+				fmt.Println("Name: " + fmt.Sprint(prc.Name()))
 				fmt.Println("Executable: " + fmt.Sprint(prc.Exe()))
 				fmt.Println("Command Line: " + fmt.Sprint(prc.Cmdline()))
 			}
 
 			pName, err = prc.Exe()
 			if err != nil {
-				return err
+				// Failed to read the link, fall back to Name() which can include flags
+				pName, err = prc.Name()
 			}
 
 			pName = strings.TrimSuffix(pName, " (deleted)")
