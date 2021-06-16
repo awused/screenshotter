@@ -14,12 +14,12 @@ import (
 
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil/ewmh"
-	"github.com/BurntSushi/xgbutil/xprop"
+	"github.com/BurntSushi/xgbutil/icccm"
 	"github.com/BurntSushi/xgbutil/xwindow"
 	"github.com/shirou/gopsutil/process"
 )
 
-var noWindowError = errors.New("No window under mouse")
+var errNoWindow = errors.New("No window under mouse")
 
 func getActiveWindowApplication(wid xproto.Window) {
 	err := setDelegateVariablesForFullWindow(wid)
@@ -49,7 +49,7 @@ func getDesktopApplicationName() {
 
 func getMouseWindowApplication() {
 	wid, err := getMouseInfo()
-	if err == noWindowError {
+	if err == errNoWindow {
 		err = overrideApplication(c.Fallback, nil)
 		if err != nil {
 			errorChan <- err
@@ -79,7 +79,7 @@ func setDelegateVariablesForFullWindow(wid xproto.Window) error {
 	delegateEnvironment["SCREENSHOTTER_GEOMETRY"] = geom
 
 	_, err = getMouseInfo()
-	if err != nil && err != noWindowError {
+	if err != nil && err != errNoWindow {
 		return err
 	}
 	return nil
@@ -109,7 +109,7 @@ func getMouseInfo() (int, error) {
 
 	wid, err := getVarFromXdotool(out, "WINDOW")
 	if err != nil {
-		return 0, noWindowError
+		return 0, errNoWindow
 	}
 
 	return strconv.Atoi(wid)
@@ -156,21 +156,23 @@ func getTargetApplication(wid xproto.Window) error {
 	var name string
 	var prc *process.Process
 
+	wmname, err := ewmh.WmNameGet(xu, wid)
+	if wmname == "" {
+		// No _NET_WM_NAME -> get WM_NAME
+		wmname, err = icccm.WmNameGet(xu, wid)
+	}
+
+	if wmname != "" {
+		delegateEnvironment["SCREENSHOTTER_WM_NAME"] = wmname
+	}
+
 	pid, err := ewmh.WmPidGet(xu, wid)
 	if err != nil {
-		// No PID -> get window name
-		name, err := ewmh.WmNameGet(xu, wid)
-		if name == "" {
-			// No _NET_WM_NAME -> get WM_NAME
-			name, err = xprop.PropValStr(xprop.GetProperty(xu, wid, "WM_NAME"))
-		}
-
+		// No PID -> Use the window class
+		wclass, err := icccm.WmClassGet(xu, wid)
 		if err != nil {
-			// No window name -> probably root window
-			name = convertApplicationName(c.Fallback)
+			name = convertApplicationName(wclass.Class)
 		}
-
-		name = convertApplicationName(name)
 	} else {
 		prc, err = process.NewProcess(int32(pid))
 		if err != nil {

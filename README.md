@@ -57,6 +57,7 @@ Environment Variable | Explanation
 -------------------- | ----------
 SCREENSHOTTER_MODE | The mode used when calling screenshotter.
 SCREENSHOTTER_NAME | The name screenshotter determined for the application, including any format strings from overrides.
+SCREENSHOTTER_WM_NAME | The name of the window from the window manager.
 SCREENSHOTTER_DIR | The directory name determined for the applications. For delegates this is the same as the name, for callbacks this reflects the output of any delegates but not whether it uses yearly/monthly directories.
 SCREENSHOTTER_WINDOWID | The Window ID of the Window used to determine the active process.
 SCREENSHOTTER_PID | The PID of the process that matched this Override. May not be present.

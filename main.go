@@ -280,12 +280,11 @@ func getFileName(app application) string {
 				d.Format("2006"),
 				d.Format("01"),
 				d.Format("02_15-04-05")+".png")
-		} else {
-			return filepath.Join(
-				path,
-				d.Format("2006-01"),
-				d.Format("02_15-04-05")+".png")
 		}
+		return filepath.Join(
+			path,
+			d.Format("2006-01"),
+			d.Format("02_15-04-05")+".png")
 	} else if app.yearly {
 		return filepath.Join(
 			path,
@@ -363,7 +362,7 @@ func selectRegion() string {
 		"-n",
 		"-f", "%g",
 		"-l",
-		"-c", "0,0,1,0.1",
+		"-c", "0,1,1,0.3",
 	}
 
 	if len(c.SlopShaders) > 0 {
