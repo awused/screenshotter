@@ -170,7 +170,7 @@ func getTargetApplication(wid xproto.Window) error {
 	if err != nil {
 		// No PID -> Use the window class
 		wclass, err := icccm.WmClassGet(xu, wid)
-		if err != nil {
+		if err == nil {
 			name = convertApplicationName(wclass.Class)
 		}
 	} else {
