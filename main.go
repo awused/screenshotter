@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/ewmh"
 	"github.com/awused/awconf"
@@ -54,6 +55,8 @@ const (
 	yes
 	maybe
 )
+
+var stderr = log.New(os.Stderr, "", 0)
 
 // If _any_ have the right window ID then we must only match against those
 var hasWindowID = maybe
@@ -150,13 +153,14 @@ func main() {
 
 		select {
 		case app := <-appChan:
-			fmt.Println("Application directory: " + app.dir)
-			fmt.Println("File name: " + getFileName(app))
+			fname := getFileName(app)
+			stderr.Println("Application directory: " + app.dir)
+			stderr.Println("File name: " + fname)
 			if c.Callback != "" {
-				fmt.Printf("Would call callback [%s] with environment:\n", c.Callback)
+				stderr.Printf("Would call callback [%s] with environment:\n", c.Callback)
 
 				for k, v := range delegateEnvironment {
-					fmt.Println(k + "=" + v)
+					stderr.Println(k + "=" + v)
 				}
 			}
 
@@ -164,12 +168,43 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
+			fmt.Println(fname)
+		case err = <-errorChan:
+			panic(err)
+		}
+		return
+	case "window-name":
+		debug = true // name implies debug
+		wid, err := strconv.ParseUint(flag.Arg(1), 10, 32)
+		if err != nil {
+			panic(err)
+		}
+		go getActiveWindowApplication(xproto.Window(uint32(wid)))
+
+		select {
+		case app := <-appChan:
+			fname := getFileName(app)
+			stderr.Println("Application directory: " + app.dir)
+			stderr.Println("File name: " + fname)
+			if c.Callback != "" {
+				stderr.Printf("Would call callback [%s] with environment:\n", c.Callback)
+
+				for k, v := range delegateEnvironment {
+					stderr.Println(k + "=" + v)
+				}
+			}
+
+			err = beeep.Notify("Application Directory", app.dir, "")
+			if err != nil {
+				panic(err)
+			}
+			fmt.Println(fname)
 		case err = <-errorChan:
 			panic(err)
 		}
 		return
 	default:
-		fmt.Println("Specify mode in [window, region, desktop, name]")
+		stderr.Println("Specify mode in [window, region, desktop, name]")
 		return
 	}
 
@@ -208,8 +243,8 @@ func main() {
 	outFile := getFileName(app)
 
 	if debug {
-		fmt.Println("Application directory: " + app.dir)
-		fmt.Println("File name: " + outFile)
+		stderr.Println("Application directory: " + app.dir)
+		stderr.Println("File name: " + outFile)
 	}
 
 	err = os.MkdirAll(filepath.Dir(outFile), 0777)
@@ -224,40 +259,40 @@ func main() {
 
 	if app.callback != "" {
 		if debug {
-			fmt.Printf("Calling override callback [%s] with environment:\n",
+			stderr.Printf("Calling override callback [%s] with environment:\n",
 				app.callback)
 		}
 		cmd := exec.Command(app.callback, outFile)
 		cmd.Env = os.Environ()
 		for k, v := range delegateEnvironment {
 			if debug {
-				fmt.Println(k + "=" + v)
+				stderr.Println(k + "=" + v)
 			}
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 
 		err = cmd.Run()
 		if err != nil {
-			fmt.Printf("Override callback [%s] failed: %s\n", app.callback, err)
+			stderr.Printf("Override callback [%s] failed: %s\n", app.callback, err)
 		}
 	}
 
 	if c.Callback != "" {
 		if debug {
-			fmt.Printf("Calling callback [%s] with environment:\n", c.Callback)
+			stderr.Printf("Calling callback [%s] with environment:\n", c.Callback)
 		}
 		cmd := exec.Command(c.Callback, outFile)
 		cmd.Env = os.Environ()
 		for k, v := range delegateEnvironment {
 			if debug {
-				fmt.Println(k + "=" + v)
+				stderr.Println(k + "=" + v)
 			}
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 
 		err = cmd.Run()
 		if err != nil {
-			fmt.Printf("Callback [%s] failed: %s\n", c.Callback, err)
+			stderr.Printf("Callback [%s] failed: %s\n", c.Callback, err)
 		}
 	}
 

@@ -180,9 +180,9 @@ func getTargetApplication(wid xproto.Window) error {
 		}
 
 		if debug {
-			fmt.Println("Name: " + fmt.Sprint(prc.Name()))
-			fmt.Println("Executable: " + fmt.Sprint(prc.Exe()))
-			fmt.Println("Command Line: " + fmt.Sprint(prc.Cmdline()))
+			stderr.Println("Name: " + fmt.Sprint(prc.Name()))
+			stderr.Println("Executable: " + fmt.Sprint(prc.Exe()))
+			stderr.Println("Command Line: " + fmt.Sprint(prc.Cmdline()))
 		}
 
 		// Name() can include flags and arguments
@@ -207,9 +207,9 @@ func getTargetApplication(wid xproto.Window) error {
 			prc = child
 
 			if debug {
-				fmt.Println("Name: " + fmt.Sprint(prc.Name()))
-				fmt.Println("Executable: " + fmt.Sprint(prc.Exe()))
-				fmt.Println("Command Line: " + fmt.Sprint(prc.Cmdline()))
+				stderr.Println("Name: " + fmt.Sprint(prc.Name()))
+				stderr.Println("Executable: " + fmt.Sprint(prc.Exe()))
+				stderr.Println("Command Line: " + fmt.Sprint(prc.Cmdline()))
 			}
 
 			pName, err = prc.Exe()
@@ -289,7 +289,7 @@ func procInWindow(p *process.Process, wid xproto.Window) bool {
 // p can be nil
 func overrideApplication(name string, p *process.Process) error {
 	if debug {
-		fmt.Println("Name before overrides: " + name)
+		stderr.Println("Name before overrides: " + name)
 	}
 
 	app := application{dir: name}
@@ -350,7 +350,7 @@ func overrideApplication(name string, p *process.Process) error {
 		}
 
 		if debug {
-			fmt.Printf("Matching override: %+v\n", o)
+			stderr.Printf("Matching override: %+v\n", o)
 		}
 
 		app.yearly = o.Yearly
@@ -372,13 +372,13 @@ func overrideApplication(name string, p *process.Process) error {
 
 func runDelegate(delegate string) (string, bool) {
 	if debug {
-		fmt.Printf("Calling delegate [%s] with environment:\n", delegate)
+		stderr.Printf("Calling delegate [%s] with environment:\n", delegate)
 	}
 	cmd := exec.Command(delegate)
 	cmd.Env = os.Environ()
 	for k, v := range delegateEnvironment {
 		if debug {
-			fmt.Println(k + "=" + v)
+			stderr.Println(k + "=" + v)
 		}
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -386,12 +386,12 @@ func runDelegate(delegate string) (string, bool) {
 	stdout, err := cmd.Output()
 	out := string(stdout)
 	if debug && out != "" {
-		fmt.Println("Raw delegate output:\n" + out)
+		stderr.Println("Raw delegate output:\n" + out)
 	}
 
 	if err != nil {
 		if debug {
-			fmt.Println("Delegate exited with error: " + err.Error())
+			stderr.Println("Delegate exited with error: " + err.Error())
 		}
 
 		return "", false
@@ -407,7 +407,7 @@ func runDelegate(delegate string) (string, bool) {
 
 	dir := filepath.Join(dirs...)
 	if debug {
-		fmt.Println("Delegate directory: " + dir)
+		stderr.Println("Delegate directory: " + dir)
 	}
 	return dir, true
 }
