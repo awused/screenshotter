@@ -379,6 +379,7 @@ func selectRegion() string {
 	if c.MouseKeys {
 		xsetOut, err := exec.Command("xset", "q").Output()
 		if err != nil {
+			log.Println("Error running xset", err)
 			return ""
 		}
 

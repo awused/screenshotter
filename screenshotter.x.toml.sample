@@ -119,4 +119,3 @@ MouseKeys = false
   Name = "mpv"
   Yearly = true
   # Callback = '/home/user/bin/mpv-callback'
-

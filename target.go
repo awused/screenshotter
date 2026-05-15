@@ -118,7 +118,7 @@ func getMouseInfo() (int, error) {
 
 // Get the geometry without decorations
 // Should match slop when selecting a window
-// xdotool getwindowgeometry is simply wrong by any measure, don't use it1
+// xdotool getwindowgeometry is simply wrong by any measure, don't use it
 // xgbutil only returns relative coordinates
 func getWindowGeometry(wid xproto.Window) (string, error) {
 	win := xwindow.New(xu, wid)
@@ -383,7 +383,7 @@ func runDelegate(delegate string) (string, bool) {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 
-	stdout, err := cmd.Output()
+	stdout, err := cmd.CombinedOutput()
 	out := string(stdout)
 	if debug && out != "" {
 		stderr.Println("Raw delegate output:\n" + out)
