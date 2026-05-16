@@ -10,10 +10,10 @@ use crate::config::{CONFIG, SLURP};
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct Region {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[instrument(level = "debug", skip_all)]

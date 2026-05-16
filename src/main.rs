@@ -5,12 +5,16 @@ use std::sync::{LazyLock, Mutex};
 
 use clap::Parser;
 use color_eyre::Result;
+use notify_rust::{Notification, Urgency};
 use swayipc::{Connection, Node};
 use tracing::Level;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+use crate::config::CONFIG;
+use crate::target::MODE;
 
 #[macro_use]
 extern crate tracing;
@@ -47,7 +51,8 @@ pub struct Opt {
     cmd: Command,
 }
 
-pub static DELEGATE_ENV: LazyLock<Mutex<HashMap<&'static str, OsString>>> =
+// Just being lazy about passing this around
+pub static ENV_VARS: LazyLock<Mutex<HashMap<&'static str, OsString>>> =
     LazyLock::new(Mutex::default);
 
 pub static OPTIONS: LazyLock<Opt> = LazyLock::new(Opt::parse);
@@ -64,10 +69,10 @@ fn main() -> Result<()> {
 
     let con = Connection::new()?;
 
-    DELEGATE_ENV
-        .lock()
-        .unwrap()
-        .insert("SCREENSHOTTER_MODE", OPTIONS.cmd.str().into());
+    ENV_VARS.lock().unwrap().insert(MODE, OPTIONS.cmd.str().into());
+
+    LazyLock::force(&CONFIG);
+    trace!("Config: {:?}", CONFIG);
 
     match &OPTIONS.cmd {
         Command::Window => todo!(),
@@ -84,8 +89,17 @@ fn name(mut con: Connection) -> Result<()> {
     let region = selection::region(&windows)?;
     let window = region.best_window(windows);
     debug!("Found window {window:?}");
-    let target = target::application_for(region, window);
+    let app = target::application_for(region, window)?;
+    let target = app.relative_dir.to_string_lossy();
 
+    Notification::new()
+        .summary("application name")
+        .appname("screenshotter")
+        .body(&target)
+        .urgency(Urgency::Low)
+        .show()?;
+
+    println!("{target}");
 
     Ok(())
 }
@@ -107,7 +121,6 @@ fn visible_windows(con: &mut Connection) -> Result<Vec<Node>> {
             queue.push_back(child);
         }
         if node.pid.is_some() && node.visible.unwrap_or(false) {
-            //println!("{node:?}\n");
             out.push(node);
         }
     }
@@ -116,7 +129,7 @@ fn visible_windows(con: &mut Connection) -> Result<Vec<Node>> {
 }
 
 impl Command {
-    fn str(&self) -> &'static str {
+    const fn str(&self) -> &'static str {
         match self {
             Self::Window => "window",
             Self::Desktop => "desktop",

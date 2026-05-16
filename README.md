@@ -79,16 +79,16 @@ The delegate program will be executed with several environment variables set:
 Environment Variable | Explanation
 -------------------- | ----------
 SCREENSHOTTER_MODE | The mode used when calling screenshotter.
-SCREENSHOTTER_NAME | The name screenshotter determined for the application, including any format strings from overrides.
+SCREENSHOTTER_NAME | The name screenshotter determined for the application, including any format strings or delegate output from matching overrides for callbacks but not yearly/monthly subdirs. Based on the process unless the process is dead, in which case it is the same as SCREENSHOTTER_APP_ID on Sway or WM_CLASS on X11.
+SCREENSHOTTER_DIR | The absolute directory determined for the applications. Equivalent to screenshot_dir from the config + `/$SCREENSHOTTER_NAME`.
 SCREENSHOTTER_WM_NAME | The name or title of the window from the window manager. May not be present.
-SCREENSHOTTER_DIR | The directory name determined for the applications. For delegates this is the same as the name, for callbacks this reflects the output of any delegates but not whether it uses yearly/monthly directories.
 SCREENSHOTTER_WINDOWID | X11 ony. The Window ID of the Window used to determine the active process.
 SCREENSHOTTER_WINDOW_ID | Wayland/Sway only. The Window ID of the Window used to determine the active process. May not be stable ID on Sway.
 SCREENSHOTTER_PID | The PID of the process that matched this Override. May not be present.
 SCREENSHOTTER_MOUSEX | X11 only. The X coordinate of the cursor when the screenshot was taken.
 SCREENSHOTTER_MOUSEY | X11 only. The Y coordinate of the cursor when the screenshot was taken.
 SCREENSHOTTER_GEOMETRY | The geometry string of the selected window or region.
-SCREENSHOTTER_APP_ID | Wayland/Sway only. The APP_ID from the window. May not be present.
+SCREENSHOTTER_APP_ID | Wayland/Sway only. The APP_ID from the window, or, for xwayland, the WM_CLASS instead. May not be present.
 SCREENSHOTTER_WINDOW_PID | Wayland/Sway only. The original PID of the process from the window manager before ignoring processes.
 
 

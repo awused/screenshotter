@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -6,14 +7,28 @@ use serde::{Deserialize, Deserializer};
 use crate::OPTIONS;
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transform {
+    Format(String),
+    Delegate(PathBuf),
+}
+
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)] // Break if both format and delegate are defined
 pub struct Override {
-    name: Option<String>,
-    regex: Option<String>,
-    format: Option<String>,
-    yearly: bool,
-    monthly: bool,
-    delegate: Option<PathBuf>,
-    callback: Option<PathBuf>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub regex: Option<String>,
+    #[serde(default, flatten)]
+    pub transform: Option<Transform>,
+    #[serde(default)]
+    pub yearly: bool,
+    #[serde(default)]
+    pub monthly: bool,
+    #[serde(default)]
+    pub callback: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +67,11 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     let (config, _) =
         awconf::load_config::<Config>("screenshotter", OPTIONS.awconf.as_ref(), None::<&str>)
             .expect("Error loading config");
+    assert!(
+        config.screenshot_dir.is_absolute(),
+        "Screenshot directory {:?} is not absolute",
+        config.screenshot_dir
+    );
     assert!(
         config.screenshot_dir.is_dir(),
         "Screenshot directory {:?} is not a directory",
