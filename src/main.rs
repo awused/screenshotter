@@ -6,7 +6,7 @@ use std::sync::{LazyLock, Mutex};
 use clap::Parser;
 use color_eyre::Result;
 use notify_rust::{Notification, Urgency};
-use swayipc::{Connection, Node};
+use swayipc::{Connection, Floating, Node};
 use tracing::Level;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
@@ -20,6 +20,7 @@ use crate::target::MODE;
 extern crate tracing;
 
 mod config;
+mod ipc;
 mod selection;
 mod target;
 
@@ -67,7 +68,6 @@ fn main() -> Result<()> {
         .init();
     color_eyre::install().unwrap();
 
-    let con = Connection::new()?;
 
     ENV_VARS.lock().unwrap().insert(MODE, OPTIONS.cmd.str().into());
 
@@ -78,14 +78,14 @@ fn main() -> Result<()> {
         Command::Window => todo!(),
         Command::Desktop => todo!(),
         Command::Region => todo!(),
-        Command::Name => name(con),
+        Command::Name => name(),
     }
 }
 
 
 #[instrument(level = "error", skip_all)]
-fn name(mut con: Connection) -> Result<()> {
-    let windows = visible_windows(&mut con)?;
+fn name() -> Result<()> {
+    let windows = ipc::visible_windows()?;
     let region = selection::region(&windows)?;
     let window = region.best_window(windows);
     debug!("Found window {window:?}");
@@ -104,29 +104,6 @@ fn name(mut con: Connection) -> Result<()> {
     Ok(())
 }
 
-
-#[instrument(level = "error", skip_all)]
-fn visible_windows(con: &mut Connection) -> Result<Vec<Node>> {
-    let root = con.get_tree()?;
-
-    let mut queue: VecDeque<_> = vec![root].into();
-    let mut out = Vec::new();
-
-    while let Some(mut node) = queue.pop_front() {
-        // Floating nodes are ordered from bottom to top, we want top first.
-        while let Some(child) = node.floating_nodes.pop() {
-            queue.push_back(child);
-        }
-        for child in node.nodes.drain(..) {
-            queue.push_back(child);
-        }
-        if node.pid.is_some() && node.visible.unwrap_or(false) {
-            out.push(node);
-        }
-    }
-
-    Ok(out)
-}
 
 impl Command {
     const fn str(&self) -> &'static str {

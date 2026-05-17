@@ -1,29 +1,26 @@
 use std::cell::LazyCell;
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
-use std::convert;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
-use std::time::Instant;
 
-use color_eyre::eyre::{OptionExt, eyre};
+use color_eyre::eyre::eyre;
 use color_eyre::{Result, Section, SectionExt};
 use constcat::concat;
 use regex::{Regex, bytes};
 use strfmt::strfmt_map;
-use swayipc::Node;
 use sysinfo::{Pid, System};
 
 use crate::ENV_VARS;
 use crate::config::{CONFIG, Override, Transform};
+use crate::ipc::Window;
 use crate::selection::Region;
 
 
 const PREFIX: &str = "SCREENSHOTTER_";
-const APP_ID: &str = concat!(PREFIX, "APP_ID");
+const CLASS: &str = concat!(PREFIX, "CLASS");
 const NAME: &str = concat!(PREFIX, "NAME");
 const WINDOW_ID: &str = concat!(PREFIX, "WINDOW_ID");
 const WINDOW_PID: &str = concat!(PREFIX, "WINDOW_PID");
@@ -105,7 +102,7 @@ fn get_process(name: String, pid: u32) -> (OsString, Option<OsString>, u32) {
 }
 
 #[instrument(level = "error", skip_all)]
-pub fn application_for(region: Region, window: Option<Node>) -> Result<Application> {
+pub fn application_for(region: Region, window: Option<Window>) -> Result<Application> {
     let mut env = ENV_VARS.lock().unwrap();
     env.insert(GEOMETRY, region.to_string().into());
 
@@ -113,23 +110,16 @@ pub fn application_for(region: Region, window: Option<Node>) -> Result<Applicati
     let mut cli = None;
 
     if let Some(window) = window {
-        let pid = window.pid.ok_or_eyre("Unreachable")?;
-        if let Some(wm_name) = window.name {
+        let pid = window.pid();
+        if let Some(wm_name) = window.name() {
             env.insert(WM_NAME, wm_name.into());
         };
 
-        let name = if let Some(app_id) = window.app_id {
-            debug!("Got app_id from window \"{app_id}\"");
-            let name = app_id.rsplit_once('.').map_or(&*app_id, |(_left, right)| right);
-            let name = convert_application_name(name);
-            env.insert(APP_ID, app_id.into());
-            name
-        } else if let Some(props) = window.window_properties
-            && let Some(class) = props.class
-        {
+        let name = if let Some(class) = window.class() {
+            debug!("Got application (class) from window \"{class}\"");
             let name = class.rsplit_once('.').map_or(&*class, |(_left, right)| right);
             let name = convert_application_name(name);
-            env.insert(APP_ID, class.into());
+            env.insert(CLASS, class.into());
             name
         } else {
             convert_application_name(&CONFIG.fallback)
@@ -145,7 +135,7 @@ pub fn application_for(region: Region, window: Option<Node>) -> Result<Applicati
         env.insert(NAME, name);
         env.insert(DIR, dir.into());
         env.insert(PID, pid.to_string().into());
-        env.insert(WINDOW_ID, window.id.to_string().into());
+        env.insert(WINDOW_ID, window.id().to_string().into());
     } else {
         let name = convert_application_name(&CONFIG.fallback);
         application.relative_dir = name.clone().into();
