@@ -27,7 +27,7 @@ X11 version:
 
 # Installation
 
-The Go/X11 and Wayland/Rust versions use different configuration options. The configurations for both versions can exist in the same file to run both at once.
+The Go/X11 and Wayland/Rust versions use different configuration options, camelCase for go and snake_case for Rust. The configurations for both versions can exist in the same file to run both at once.
 
 ## Wayland (Sway/Hyprland)
 
@@ -43,9 +43,11 @@ Fill in [screenshotter.x.toml](screenshotter.x.toml) and copy it to $HOME/.scree
 
 # Usage
 
-Take a screenshot with `screenshotter {mode}` where mode is desktop, window (for the active window), region (to select a window or rectangular region), or name.
+Take a screenshot with `screenshotter {mode}` where mode is `desktop`, `window` (for the active window), `region` (to select a window or rectangular region), `name`, or `prop`.
 
 The `name` mode does not take a screenshot and can be used to ensure that your configuration is working properly without polluting your screenshots directory.
+
+The `prop` mode outputs json on stdout and can be used as a "swayprop" or "hyprprop" command. It does a better job at selecting the visible portion of the active window provided my fork of slurp is also used.
 
 # Configuration
 

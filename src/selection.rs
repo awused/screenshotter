@@ -1,12 +1,12 @@
+use std::cmp::{max, min};
 use std::fmt::Display;
 use std::io::Write;
 use std::process::{Command, Stdio, exit};
 
-use color_eyre::eyre::{OptionExt, bail, eyre};
+use color_eyre::eyre::{OptionExt, eyre};
 use color_eyre::{Result, Section, SectionExt};
-use swayipc::Node;
 
-use crate::config::{CONFIG, SLURP};
+use crate::config::SLURP;
 use crate::ipc::Window;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -18,7 +18,7 @@ pub struct Region {
 }
 
 #[instrument(level = "debug", skip_all)]
-pub fn region(windows: &Vec<Window>) -> Result<Region> {
+pub fn region(windows: &[Window]) -> Result<Region> {
     let mut cmd = Command::new(*SLURP);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -27,7 +27,7 @@ pub fn region(windows: &Vec<Window>) -> Result<Region> {
         let mut stdin = child.stdin.take().ok_or_eyre("Child missing pipe")?;
 
         // Depending on how slurp changes this rev() can be removed.
-        for w in windows.iter().rev() {
+        for w in windows {
             let r = w.region();
             stdin.write_all(&r.to_string().into_bytes())?;
             stdin.write_all(b"\n")?;
@@ -96,5 +96,24 @@ impl Region {
         let x = self.x + self.width / 2;
         let y = self.y + self.height / 2;
         windows.into_iter().find(|w| w.region().contains(x, y))
+    }
+
+    #[cfg(feature = "hyprland")]
+    // Returns a non-empty intersection
+    pub fn intersect(self, other: &Self) -> Option<Self> {
+        let left = max(self.x, other.x);
+        let right = min(self.x + self.width, other.x + other.width);
+        let top = max(self.y, other.y);
+        let bottom = min(self.y + self.height, other.y + other.height);
+        if right > left && bottom > top {
+            Some(Self {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            })
+        } else {
+            None
+        }
     }
 }

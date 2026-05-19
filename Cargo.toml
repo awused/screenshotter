@@ -14,11 +14,21 @@ regex = "1.12.3"
 serde = { version = "1.0.228", default-features = false, features = [ "derive" ] }
 shlex = "1.3.0"
 strfmt = "0.2.5"
-swayipc = "4.0.0"
-hyprland = "=0.4.0-beta.3"
+swayipc = { version = "4.0.0", optional = true }
+# hyprland = { version = "=0.4.0-beta.3", optional = true }
+# hyprland = { git = "https://github.com/hyprland-community/hyprland-rs", branch = "master", optional = true }
+hyprland = { git = "https://github.com/awused/hyprland-rs", branch = "client-workspaces-55", optional = true }
+# hyprland = { path = "../../third_party/hyprland-rs", optional = true }
 sysinfo = "0.39.1"
 tempfile = "3.27.0"
 tracing = "0.1.44"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 toml = "1.1.2"
+serde_json = "1.0.149"
+
+
+[features]
+default = ["hyprland", "sway"]
+hyprland = ["dep:hyprland"]
+sway = ["dep:swayipc"]

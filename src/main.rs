@@ -1,12 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::exit;
 use std::sync::{LazyLock, Mutex};
 
 use clap::Parser;
 use color_eyre::Result;
 use notify_rust::{Notification, Urgency};
-use swayipc::{Connection, Floating, Node};
 use tracing::Level;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
@@ -36,6 +36,8 @@ enum Command {
     /// Gets the output name and directory for a screenshot without actually taking the screenshot.
     /// Intended for debugging configs.
     Name,
+    /// Behaves roughly like xprop with json output. Comparable to hyprctrl -j
+    Prop,
 }
 
 #[derive(Debug, Parser)]
@@ -71,20 +73,20 @@ fn main() -> Result<()> {
 
     ENV_VARS.lock().unwrap().insert(MODE, OPTIONS.cmd.str().into());
 
-    LazyLock::force(&CONFIG);
-    trace!("Config: {:?}", CONFIG);
-
     match &OPTIONS.cmd {
         Command::Window => todo!(),
         Command::Desktop => todo!(),
         Command::Region => todo!(),
         Command::Name => name(),
+        Command::Prop => prop(),
     }
 }
 
 
 #[instrument(level = "error", skip_all)]
 fn name() -> Result<()> {
+    LazyLock::force(&CONFIG);
+
     let windows = ipc::visible_windows()?;
     let region = selection::region(&windows)?;
     let window = region.best_window(windows);
@@ -104,6 +106,17 @@ fn name() -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "error", skip_all)]
+fn prop() -> Result<()> {
+    let windows = ipc::visible_windows()?;
+    let region = selection::region(&windows)?;
+    if let Some(window) = region.best_window(windows) {
+        window.dump();
+    }
+
+    Ok(())
+}
+
 
 impl Command {
     const fn str(&self) -> &'static str {
@@ -112,6 +125,7 @@ impl Command {
             Self::Desktop => "desktop",
             Self::Region => "region",
             Self::Name => "name",
+            Self::Prop => "prop",
         }
     }
 }

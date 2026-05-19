@@ -741,8 +741,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "hyprland"
 version = "0.4.0-beta.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62fc24052f578592af91e5c60da1893ba6aea266b6ab86ffb72a644cf213fea9"
+source = "git+https://github.com/awused/hyprland-rs?branch=client-workspaces-55#39602148577571a1691e56a2b5cd20aa5d9dbeee"
 dependencies = [
  "async-stream",
  "derive_more",
@@ -759,8 +758,7 @@ dependencies = [
 [[package]]
 name = "hyprland-macros"
 version = "0.4.0-beta.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31157e6ccefbad4b0cd7e549db6696691a70c11b108f26bf6bf76eef26af8c10"
+source = "git+https://github.com/awused/hyprland-rs?branch=client-workspaces-55#39602148577571a1691e56a2b5cd20aa5d9dbeee"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1291,6 +1289,7 @@ dependencies = [
  "notify-rust",
  "regex",
  "serde",
+ "serde_json",
  "shlex",
  "strfmt",
  "swayipc",
