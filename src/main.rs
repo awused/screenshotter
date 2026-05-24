@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::exit;
@@ -7,6 +7,7 @@ use std::sync::{LazyLock, Mutex};
 use clap::Parser;
 use color_eyre::Result;
 use notify_rust::{Notification, Urgency};
+use serde_json::Value;
 use tracing::Level;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
@@ -14,6 +15,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::CONFIG;
+use crate::ipc::Window;
 use crate::target::MODE;
 
 #[macro_use]
@@ -36,8 +38,15 @@ enum Command {
     /// Gets the output name and directory for a screenshot without actually taking the screenshot.
     /// Intended for debugging configs.
     Name,
-    /// Behaves roughly like xprop with json output. Comparable to hyprctrl -j
+    /// Behaves roughly like xprop with json output.
+    /// Output is compositor dependent and should match hypctrl -j clients or equivalent.
     Prop,
+    /// Dump data about all visible windows including their visible rectangles.
+    /// Only considers portions of
+    /// Output is compositor dependent and should match hypctrl -j clients or equivalent.
+    /// Windows should be ordered from front to back.
+    /// visible_region will be in the form {x: int, y: int, width: int, height: int}
+    VisibleWindows,
 }
 
 #[derive(Debug, Parser)]
@@ -79,6 +88,7 @@ fn main() -> Result<()> {
         Command::Region => todo!(),
         Command::Name => name(),
         Command::Prop => prop(),
+        Command::VisibleWindows => visible(),
     }
 }
 
@@ -117,6 +127,17 @@ fn prop() -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "error", skip_all)]
+fn visible() -> Result<()> {
+    let windows = ipc::visible_windows()?;
+
+    let json = Value::Array(windows.iter().map(Window::to_json).collect::<Vec<_>>());
+
+    println!("{json}");
+
+    Ok(())
+}
+
 
 impl Command {
     const fn str(&self) -> &'static str {
@@ -126,6 +147,7 @@ impl Command {
             Self::Region => "region",
             Self::Name => "name",
             Self::Prop => "prop",
+            Self::VisibleWindows => "visible_windows",
         }
     }
 }

@@ -9,6 +9,7 @@ use hyprland::{
     data::{Clients, Monitors, Workspaces},
     shared::HyprData,
 };
+use serde_json::Value;
 #[cfg(feature = "sway")]
 use swayipc::Connection;
 
@@ -89,6 +90,22 @@ impl Window {
             Self::Hypr(client, _region) => println!("{}", serde_json::to_string(&client).unwrap()),
         }
     }
+
+    pub fn to_json(&self) -> Value {
+        let mut out = serde_json::Map::new();
+        out.insert("visible_region".to_string(), serde_json::to_value(self.region()).unwrap());
+
+        let obj = match self {
+            #[cfg(feature = "sway")]
+            Self::Sway(node) => serde_json::to_value(node).unwrap(),
+            #[cfg(feature = "hyprland")]
+            Self::Hypr(client, _) => serde_json::to_value(client).unwrap(),
+        };
+
+        out.insert("window".to_string(), obj);
+
+        Value::Object(out)
+    }
 }
 
 #[cfg(feature = "sway")]
@@ -138,7 +155,7 @@ fn hyprland() -> Result<Vec<Window>> {
 
     let mut clients: Vec<_> = clients
         .into_iter()
-        .filter(|c| c.visible && c.mapped && !c.hidden)
+        .filter(|c| c.visible && c.mapped && !c.hidden && c.accepts_input)
         .filter_map(|client| {
             let (workspace, monitor) = workspaces.get(&client.workspace.id)?;
             let c_region = Region {
@@ -153,8 +170,9 @@ fn hyprland() -> Result<Vec<Window>> {
                 let m_region = Region {
                     x: monitor.x,
                     y: monitor.y,
-                    width: monitor.width as _,
-                    height: monitor.height as _,
+
+                    width: (monitor.width as f32 / monitor.scale).round() as _,
+                    height: (monitor.height as f32 / monitor.scale).round() as _,
                 };
 
                 // Can this cross multiple monitors?
@@ -184,7 +202,7 @@ pub fn visible_windows() -> Result<Vec<Window>> {
             Err(e) => {
                 use color_eyre::{Section, SectionExt};
 
-                trace!("Failed to connec to hyprland: {e}");
+                trace!("Failed to connect to hyprland: {e}");
                 err = err.section(e.header("hyprland:"));
             }
         }
@@ -198,7 +216,7 @@ pub fn visible_windows() -> Result<Vec<Window>> {
             Err(e) => {
                 use color_eyre::{Section, SectionExt};
 
-                trace!("Failed to connec to sway: {e}");
+                trace!("Failed to connect to sway: {e}");
                 err = err.section(e.header("sway:"));
             }
         }

@@ -5,11 +5,13 @@ use std::process::{Command, Stdio, exit};
 
 use color_eyre::eyre::{OptionExt, eyre};
 use color_eyre::{Result, Section, SectionExt};
+use serde::Serialize;
 
 use crate::config::SLURP;
 use crate::ipc::Window;
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+// A region in global logical pixels
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize)]
 pub struct Region {
     pub x: i32,
     pub y: i32,

@@ -741,7 +741,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "hyprland"
 version = "0.4.0-beta.3"
-source = "git+https://github.com/awused/hyprland-rs?branch=client-workspaces-55#39602148577571a1691e56a2b5cd20aa5d9dbeee"
+source = "git+https://github.com/hyprland-community/hyprland-rs?branch=master#2d11487cf4c1f333db9df6b6f291b96cc6daf1f7"
 dependencies = [
  "async-stream",
  "derive_more",
@@ -758,7 +758,7 @@ dependencies = [
 [[package]]
 name = "hyprland-macros"
 version = "0.4.0-beta.3"
-source = "git+https://github.com/awused/hyprland-rs?branch=client-workspaces-55#39602148577571a1691e56a2b5cd20aa5d9dbeee"
+source = "git+https://github.com/hyprland-community/hyprland-rs?branch=master#2d11487cf4c1f333db9df6b6f291b96cc6daf1f7"
 dependencies = [
  "proc-macro2",
  "quote",
