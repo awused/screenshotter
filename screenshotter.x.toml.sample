@@ -80,42 +80,42 @@ MouseKeys = false
 # This is not considered when matching overrides.
 
 
-[[Overrides]]
+[[OverridesX]]
   Name = "vimx"
   Format = "vim"
 
-[[Overrides]]
+[[OverridesX]]
   Name = "i3"
   Format = "desktop"
 
-[[Overrides]]
+[[OverridesX]]
   Name = "chromium-browser"
   Format = "chromium"
 
-[[Overrides]]
+[[OverridesX]]
   Name = "wine32-preloader"
   Regex = '^.*/([^/ ]+)\.exe'
   Format = "%[2]s"
 
-[[Overrides]]
+[[OverridesX]]
   Name = "python2-7"
   Regex = '^/usr/bin/python.*/bin/([^/ ]+)( .*)?'
   Format = "%[2]s"
 
-[[Overrides]]
+[[OverridesX]]
   Name = "watch"
   Regex = '^watch ([^ ]*)?'
   Format = "%[2]s"
 
-[[Overrides]]
+[[OverridesX]]
   Name = "firefox"
   Yearly = true
 
-[[Overrides]]
+[[OverridesX]]
   Name = "mcomix"
   Yearly = true
 
-[[Overrides]]
+[[OverridesX]]
   Name = "mpv"
   Yearly = true
   # Callback = '/home/user/bin/mpv-callback'

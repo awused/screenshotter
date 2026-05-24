@@ -296,7 +296,12 @@ func overrideApplication(name string, p *process.Process) error {
 	delegateEnvironment["SCREENSHOTTER_NAME"] = name
 	delegateEnvironment["SCREENSHOTTER_DIR"] = name
 
-	for _, o := range c.Overrides {
+	overrides := c.OverridesX
+	if len(overrides) == 0 {
+		overrides = c.Overrides
+	}
+
+	for _, o := range overrides {
 		delegateEnvironment["SCREENSHOTTER_NAME"] = name
 		delegateEnvironment["SCREENSHOTTER_DIR"] = name
 

@@ -34,13 +34,15 @@ type config struct {
 	ScreenshotDir      string
 	Fallback           string
 	YearlyApplications *[]string
-	Overrides          []override
-	IgnoredParents     []string
-	CheckWindowID      bool
-	Compression        int
-	SlopShaders        []string
-	Callback           string
-	MouseKeys          bool
+	// Go has a broken toml parser.
+	Overrides      []override
+	OverridesX     []override
+	IgnoredParents []string
+	CheckWindowID  bool
+	Compression    int
+	SlopShaders    []string
+	Callback       string
+	MouseKeys      bool
 }
 
 type application struct {
