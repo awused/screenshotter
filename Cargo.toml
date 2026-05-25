@@ -24,15 +24,19 @@ serde_json = "1.0.149"
 sysinfo = "0.39.1"
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = [ "macros", "process", "rt", "sync", "time" ] }
-tracing = "0.1.44"
-tracing-error = "0.2.1"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 toml = "1.1.2"
-# Use kit because of big breaking changes coming
+# Use git because of big breaking changes coming
 wayland-protocols-wlr = { git = "https://github.com/Smithay/wayland-rs" , features = ["client"] }
 wayland-client = {git = "https://github.com/Smithay/wayland-rs"}
 wayland-protocols = { git = "https://github.com/Smithay/wayland-rs", features = ["client", "staging", "unstable"] }
 
+
+# Tracing
+nu-ansi-term = "0.50.3"
+tracing = "0.1.44"
+tracing-log = "0.2.0"
+tracing-error = "0.2.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [features]
 default = ["hyprland", "sway"]

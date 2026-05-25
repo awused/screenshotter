@@ -5,25 +5,25 @@ use std::sync::{LazyLock, Mutex};
 
 use clap::Parser;
 use color_eyre::Result;
+use futures::future::{Either, select};
 use notify_rust::{Notification, Urgency};
 use serde_json::Value;
-use tracing::Level;
-use tracing_error::ErrorLayer;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tokio::pin;
 
 use crate::config::CONFIG;
 use crate::ipc::Window;
 use crate::target::MODE;
+use crate::wayland::Conn;
 
 #[macro_use]
 extern crate tracing;
 
 mod config;
+mod elapsedlogger;
 mod ipc;
 mod selection;
 mod target;
+mod wayland;
 
 #[derive(Debug, Parser)]
 enum Command {
@@ -70,14 +70,9 @@ pub static OPTIONS: LazyLock<Opt> = LazyLock::new(Opt::parse);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let filter_layer =
-        EnvFilter::builder().with_default_directive(Level::INFO.into()).from_env_lossy();
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer())
-        .with(ErrorLayer::default())
-        .init();
+    elapsedlogger::init_logging();
     color_eyre::install().unwrap();
+    trace!("Starting main");
 
 
     ENV_VARS.lock().unwrap().insert(MODE, OPTIONS.cmd.str().into());
@@ -95,14 +90,17 @@ async fn main() -> Result<()> {
 
 #[instrument(level = "error", skip_all)]
 async fn name() -> Result<()> {
+    trace!("Starting name");
     LazyLock::force(&CONFIG);
+    let mut finder = target::ApplicationFinder::init();
+    let mut con = wayland::Conn::init(false, true)?;
+    let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
-    let windows = ipc::visible_windows().await?;
-    println!("{windows:?}");
+
     let region = selection::region(&windows)?;
     let window = region.best_window(windows);
     debug!("Found window {window:?}");
-    let app = target::application_for(region, window)?;
+    let app = finder.application_for(region, window).await?;
     let target = app.relative_dir.to_string_lossy();
 
     Notification::new()
@@ -119,8 +117,10 @@ async fn name() -> Result<()> {
 
 #[instrument(level = "error", skip_all)]
 async fn prop() -> Result<()> {
-    let windows = ipc::visible_windows().await?;
-    println!("{windows:?}");
+    trace!("Starting prop");
+    let mut con = wayland::Conn::init(false, true)?;
+    let windows = while_polling(ipc::visible_windows(), &mut con).await?;
+
     let region = selection::region(&windows)?;
     if let Some(window) = region.best_window(windows) {
         window.dump();
@@ -138,6 +138,20 @@ async fn visible() -> Result<()> {
     println!("{json}");
 
     Ok(())
+}
+
+// If we need to do more than this, it'd be better to spawn() and use channels
+async fn while_polling<T>(fut: impl Future<Output = Result<T>>, con: &mut Conn) -> Result<T> {
+    pin! {
+        let right = fut;
+        let poll = con.poll();
+    };
+
+    match select(right, poll).await {
+        Either::Left((right, _)) => right,
+        Either::Right((Err(e), _)) => Err(e),
+        Either::Right((Ok(_), _)) => unreachable!(),
+    }
 }
 
 

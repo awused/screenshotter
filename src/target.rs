@@ -12,6 +12,7 @@ use constcat::concat;
 use regex::{Regex, bytes};
 use strfmt::strfmt_map;
 use sysinfo::{Pid, System};
+use tokio::task::{JoinHandle, spawn_blocking};
 
 use crate::ENV_VARS;
 use crate::config::{CONFIG, Override, Transform};
@@ -38,26 +39,113 @@ pub struct Application {
     pub callback: Option<&'static Path>,
 }
 
-#[instrument(level = "error")]
-fn get_process(name: String, pid: u32) -> (OsString, Option<OsString>, u32) {
+#[derive(Debug, Default)]
+pub struct ApplicationFinder {
+    system: Option<JoinHandle<System>>,
+}
+
+impl ApplicationFinder {
+    pub fn init() -> Self {
+        let system = spawn_blocking(|| {
+            let mut system = System::new();
+            trace!("Attempting to get info for processes");
+            // Getting information on the processes is ~100ms
+            if system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                sysinfo::ProcessRefreshKind::nothing()
+                    .with_cmd(sysinfo::UpdateKind::Always)
+                    .with_exe(sysinfo::UpdateKind::Always),
+            ) == 0
+            {
+                warn!("Failed to get process info for any processes");
+            }
+            trace!("Finished getting info for processes");
+            system
+        });
+
+        Self { system: Some(system) }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[instrument(level = "error", skip_all)]
+    pub async fn application_for(
+        &mut self,
+        region: Region,
+        window: Option<Window>,
+    ) -> Result<Application> {
+        let mut env = ENV_VARS.lock().unwrap();
+        env.insert(GEOMETRY, region.to_string().into());
+
+        let mut application = Application::default();
+        let mut cli = None;
+
+        if let Some(window) = window {
+            let pid = window.pid();
+            if let Some(wm_name) = window.name() {
+                env.insert(WM_NAME, wm_name.into());
+            };
+
+            let name = if let Some(class) = window.class() {
+                debug!("Got application (class) from window \"{class}\"");
+                let name = class.rsplit_once('.').map_or(class, |(_left, right)| right);
+                let name = convert_application_name(name);
+                env.insert(CLASS, class.into());
+                name
+            } else {
+                convert_application_name(&CONFIG.fallback)
+            };
+
+            env.insert(WINDOW_PID, pid.to_string().into());
+            let system = self.system.take().unwrap().await?;
+            let (name, cmd, pid) = get_process(system, name, pid as u32);
+            cli = cmd;
+
+            let mut dir = CONFIG.screenshot_dir.clone();
+            dir.push(&name);
+            application.relative_dir = name.clone().into();
+            env.insert(NAME, name);
+            env.insert(DIR, dir.into());
+            env.insert(PID, pid.to_string().into());
+            env.insert(WINDOW_ID, window.id().into());
+        } else {
+            let name = convert_application_name(&CONFIG.fallback);
+            application.relative_dir = name.clone().into();
+            env.insert(NAME, name.clone().into());
+            let mut dir = CONFIG.screenshot_dir.clone();
+            dir.push(name);
+            env.insert(DIR, dir.into());
+        }
+
+        // Delegates could take a long time to run, could parallelize them.
+        drop(env);
+
+        for over in &CONFIG.overrides {
+            if run_override(&mut application, &cli, over)? {
+                let mut env = ENV_VARS.lock().unwrap();
+                env.insert(NAME, application.relative_dir.clone().into());
+
+                let mut dir = CONFIG.screenshot_dir.clone();
+                dir.push(&application.relative_dir);
+                env.insert(DIR, dir.into());
+
+
+                drop(env);
+
+                break;
+            }
+        }
+
+        debug!("Determined application to be {application:?}");
+        Ok(application)
+    }
+}
+
+#[instrument(level = "error", skip(system))]
+fn get_process(system: System, name: String, pid: u32) -> (OsString, Option<OsString>, u32) {
     let mut pid = Pid::from_u32(pid);
     let mut name = OsString::from(name);
-    let mut system = System::new();
     let mut cli = None;
-
-    trace!("Attempting to get info for processes");
-    // Getting information on the processes is ~100ms
-    if system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::All,
-        true,
-        sysinfo::ProcessRefreshKind::nothing()
-            .with_cmd(sysinfo::UpdateKind::Always)
-            .with_exe(sysinfo::UpdateKind::Always),
-    ) == 0
-    {
-        warn!("Failed to get process info for any processes");
-        return (name, cli, pid.as_u32());
-    }
 
     let Some(mut process) = system.process(pid) else {
         error!("Could not find process");
@@ -99,72 +187,6 @@ fn get_process(name: String, pid: u32) -> (OsString, Option<OsString>, u32) {
     }
 
     (name, cli, pid.as_u32())
-}
-
-#[instrument(level = "error", skip_all)]
-pub fn application_for(region: Region, window: Option<Window>) -> Result<Application> {
-    let mut env = ENV_VARS.lock().unwrap();
-    env.insert(GEOMETRY, region.to_string().into());
-
-    let mut application = Application::default();
-    let mut cli = None;
-
-    if let Some(window) = window {
-        let pid = window.pid();
-        if let Some(wm_name) = window.name() {
-            env.insert(WM_NAME, wm_name.into());
-        };
-
-        let name = if let Some(class) = window.class() {
-            debug!("Got application (class) from window \"{class}\"");
-            let name = class.rsplit_once('.').map_or(&*class, |(_left, right)| right);
-            let name = convert_application_name(name);
-            env.insert(CLASS, class.into());
-            name
-        } else {
-            convert_application_name(&CONFIG.fallback)
-        };
-
-        env.insert(WINDOW_PID, pid.to_string().into());
-        let (name, cmd, pid) = get_process(name, pid as u32);
-        cli = cmd;
-
-        let mut dir = CONFIG.screenshot_dir.clone();
-        dir.push(&name);
-        application.relative_dir = name.clone().into();
-        env.insert(NAME, name);
-        env.insert(DIR, dir.into());
-        env.insert(PID, pid.to_string().into());
-        env.insert(WINDOW_ID, window.id().to_string().into());
-    } else {
-        let name = convert_application_name(&CONFIG.fallback);
-        application.relative_dir = name.clone().into();
-        env.insert(NAME, name.clone().into());
-        let mut dir = CONFIG.screenshot_dir.clone();
-        dir.push(name);
-        env.insert(DIR, dir.into());
-    }
-    // Delegates could take a long time to run, could parallelize them.
-    drop(env);
-
-    for over in &CONFIG.overrides {
-        if run_override(&mut application, &cli, over)? {
-            let mut env = ENV_VARS.lock().unwrap();
-            env.insert(NAME, application.relative_dir.clone().into());
-
-            let mut dir = CONFIG.screenshot_dir.clone();
-            dir.push(&application.relative_dir);
-            env.insert(DIR, dir.into());
-
-
-            drop(env);
-
-            break;
-        }
-    }
-
-    debug!("Determined application to be {application:?}");
-    Ok(application)
 }
 
 #[instrument(level = "error", skip(app, cli))]
