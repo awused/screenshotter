@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::exit;
 use std::sync::{LazyLock, Mutex};
 
 use clap::Parser;
@@ -45,7 +44,7 @@ enum Command {
     /// Only considers portions of
     /// Output is compositor dependent and should match hypctrl -j clients or equivalent.
     /// Windows should be ordered from front to back.
-    /// visible_region will be in the form {x: int, y: int, width: int, height: int}
+    /// `visible_region` will be in the form {x: int, y: int, width: int, height: int}
     VisibleWindows,
 }
 
@@ -69,7 +68,8 @@ pub static ENV_VARS: LazyLock<Mutex<HashMap<&'static str, OsString>>> =
 
 pub static OPTIONS: LazyLock<Opt> = LazyLock::new(Opt::parse);
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let filter_layer =
         EnvFilter::builder().with_default_directive(Level::INFO.into()).from_env_lossy();
     tracing_subscriber::registry()
@@ -86,18 +86,19 @@ fn main() -> Result<()> {
         Command::Window => todo!(),
         Command::Desktop => todo!(),
         Command::Region => todo!(),
-        Command::Name => name(),
-        Command::Prop => prop(),
-        Command::VisibleWindows => visible(),
+        Command::Name => name().await,
+        Command::Prop => prop().await,
+        Command::VisibleWindows => visible().await,
     }
 }
 
 
 #[instrument(level = "error", skip_all)]
-fn name() -> Result<()> {
+async fn name() -> Result<()> {
     LazyLock::force(&CONFIG);
 
-    let windows = ipc::visible_windows()?;
+    let windows = ipc::visible_windows().await?;
+    println!("{windows:?}");
     let region = selection::region(&windows)?;
     let window = region.best_window(windows);
     debug!("Found window {window:?}");
@@ -117,8 +118,9 @@ fn name() -> Result<()> {
 }
 
 #[instrument(level = "error", skip_all)]
-fn prop() -> Result<()> {
-    let windows = ipc::visible_windows()?;
+async fn prop() -> Result<()> {
+    let windows = ipc::visible_windows().await?;
+    println!("{windows:?}");
     let region = selection::region(&windows)?;
     if let Some(window) = region.best_window(windows) {
         window.dump();
@@ -128,8 +130,8 @@ fn prop() -> Result<()> {
 }
 
 #[instrument(level = "error", skip_all)]
-fn visible() -> Result<()> {
-    let windows = ipc::visible_windows()?;
+async fn visible() -> Result<()> {
+    let windows = ipc::visible_windows().await?;
 
     let json = Value::Array(windows.iter().map(Window::to_json).collect::<Vec<_>>());
 

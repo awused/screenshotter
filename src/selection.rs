@@ -1,4 +1,3 @@
-use std::cmp::{max, min};
 use std::fmt::Display;
 use std::io::Write;
 use std::process::{Command, Stdio, exit};
@@ -103,6 +102,8 @@ impl Region {
     #[cfg(feature = "hyprland")]
     // Returns a non-empty intersection
     pub fn intersect(self, other: &Self) -> Option<Self> {
+        use std::cmp::{max, min};
+
         let left = max(self.x, other.x);
         let right = min(self.x + self.width, other.x + other.width);
         let top = max(self.y, other.y);

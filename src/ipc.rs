@@ -1,17 +1,17 @@
-#[cfg(feature = "hyprland")]
-use std::collections::HashMap;
-use std::collections::VecDeque;
-
-use color_eyre::Result;
 use color_eyre::eyre::eyre;
-#[cfg(feature = "hyprland")]
-use hyprland::{
-    data::{Clients, Monitors, Workspaces},
-    shared::HyprData,
-};
+use color_eyre::{Report, Result, Section, SectionExt};
+use futures::future::pending;
 use serde_json::Value;
+use tokio::{pin, select};
+#[cfg(feature = "hyprland")]
+use {
+    hyprland::data::{Clients, Monitors, Workspaces},
+    hyprland::shared::HyprData,
+    std::collections::HashMap,
+    tokio::try_join,
+};
 #[cfg(feature = "sway")]
-use swayipc::Connection;
+use {std::collections::VecDeque, swayipc::Connection, tokio::task::spawn_blocking};
 
 use crate::selection::Region;
 
@@ -108,9 +108,10 @@ impl Window {
     }
 }
 
+
 #[cfg(feature = "sway")]
 #[instrument(level = "error", skip_all)]
-fn sway() -> Result<Vec<Window>> {
+fn sway_blocking() -> Result<Vec<Window>> {
     let mut con = Connection::new()?;
     let root = con.get_tree()?;
 
@@ -140,13 +141,22 @@ fn sway() -> Result<Vec<Window>> {
     Ok(out)
 }
 
+#[cfg(feature = "sway")]
+#[instrument(level = "error", skip_all)]
+async fn sway() -> Result<Vec<Window>> {
+    spawn_blocking(sway_blocking).await?
+}
+
 
 #[cfg(feature = "hyprland")]
 #[instrument(level = "error", skip_all)]
-fn hyprland() -> Result<Vec<Window>> {
-    let clients = Clients::get()?;
-    let monitors = Monitors::get()?;
-    let workspaces = Workspaces::get()?;
+async fn hyprland() -> Result<Vec<Window>> {
+    let clients = Clients::get_async();
+    let monitors = Monitors::get_async();
+    let workspaces = Workspaces::get_async();
+
+    let (clients, monitors, workspaces) = try_join!(clients, monitors, workspaces)?;
+
     let workspaces: HashMap<_, _> = workspaces
         .iter()
         .filter_map(|w| monitors.iter().find(|m| m.active_workspace.id == w.id).map(|m| (w, m)))
@@ -188,39 +198,61 @@ fn hyprland() -> Result<Vec<Window>> {
     Ok(clients.into_iter().map(|(c, r)| Window::Hypr(c, r)).collect())
 }
 
-// Tries hyprland then tries sway
+// Tries hyprland and sway
 // Returns windows top to bottom, or at least first to last in terms of what must be matched
 #[instrument(level = "error", skip_all)]
-pub fn visible_windows() -> Result<Vec<Window>> {
-    let mut err = eyre!("No connection could be made");
+pub async fn visible_windows() -> Result<Vec<Window>> {
+    let make_err = || eyre!("No connection could be made");
+    let mut err: Option<Report> = None;
+    let mut extend_err = |head: &'static str, e: Report| {
+        err = Some(err.take().unwrap_or_else(make_err).section(e.header(head)))
+    };
+    #[allow(unused)]
+    let pending = || pending::<Result<Vec<Window>>>();
+
 
     #[cfg(feature = "hyprland")]
-    {
-        debug!("Attempting to connect to hyprland");
-        match hyprland() {
-            Ok(w) => return Ok(w),
-            Err(e) => {
-                use color_eyre::{Section, SectionExt};
-
-                trace!("Failed to connect to hyprland: {e}");
-                err = err.section(e.header("hyprland:"));
-            }
-        }
-    }
+    let (hyprland, mut try_hyprland) = (hyprland(), true);
+    #[cfg(not(feature = "hyprland"))]
+    let (hyprland, mut try_hyprland) = (pending(), false);
 
     #[cfg(feature = "sway")]
-    {
-        debug!("Attempting to connect to sway");
-        match sway() {
-            Ok(w) => return Ok(w),
-            Err(e) => {
-                use color_eyre::{Section, SectionExt};
+    let (sway, mut try_sway) = (sway(), true);
+    #[cfg(not(feature = "sway"))]
+    let (sway, mut try_sway) = (pending(), false);
 
-                trace!("Failed to connect to sway: {e}");
-                err = err.section(e.header("sway:"));
+    pin!(hyprland, sway);
+
+
+    loop {
+        select! {
+            res = &mut hyprland, if try_hyprland => {
+                try_hyprland = false;
+
+                match res {
+                    Ok(w) => return Ok(w),
+                    Err(e) => {
+                        trace!("Failed to connect to hyprland: {e}");
+                        extend_err("hyprland:", e);
+                    },
+                }
+            },
+
+            res = &mut sway, if try_sway => {
+                try_sway = false;
+
+                match res {
+                    Ok(w) => return Ok(w),
+                    Err(e) => {
+                        trace!("Failed to connect to sway: {e}");
+                        extend_err("sway:", e);
+                    },
+                }
+            },
+
+            else => {
+                return Err(err.take().unwrap_or_else(make_err))
             }
         }
     }
-
-    Err(err)
 }

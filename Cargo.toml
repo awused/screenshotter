@@ -8,6 +8,7 @@ awconf = { git = "https://github.com/awused/awconf" }
 clap = { version = "4.6.1", features = ["derive", "color"] }
 color-eyre = "0.6.5"
 constcat = "0.6.1"
+futures = "0.3.32"
 image = { version = "0.25.10", default-features = false, features = [ "pnm", "png" ] }
 notify-rust = "4.17.0"
 regex = "1.12.3"
@@ -19,13 +20,18 @@ swayipc = { version = "4.0.0", optional = true }
 hyprland = { git = "https://github.com/hyprland-community/hyprland-rs", branch = "master", optional = true }
 # hyprland = { git = "https://github.com/awused/hyprland-rs", branch = "client-workspaces-55", optional = true }
 # hyprland = { path = "../../third_party/hyprland-rs", optional = true }
+serde_json = "1.0.149"
 sysinfo = "0.39.1"
 tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = [ "macros", "process", "rt", "sync", "time" ] }
 tracing = "0.1.44"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 toml = "1.1.2"
-serde_json = "1.0.149"
+# Use kit because of big breaking changes coming
+wayland-protocols-wlr = { git = "https://github.com/Smithay/wayland-rs" , features = ["client"] }
+wayland-client = {git = "https://github.com/Smithay/wayland-rs"}
+wayland-protocols = { git = "https://github.com/Smithay/wayland-rs", features = ["client", "staging", "unstable"] }
 
 
 [features]
