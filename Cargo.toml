@@ -10,6 +10,8 @@ color-eyre = "0.6.5"
 constcat = "0.6.1"
 futures = "0.3.32"
 image = { version = "0.25.10", default-features = false, features = [ "pnm", "png" ] }
+libc = "0.2.186"
+nix = {version = "0.31.3", default-features = false }
 notify-rust = "4.17.0"
 regex = "1.12.3"
 serde = { version = "1.0.228", default-features = false, features = [ "derive" ] }

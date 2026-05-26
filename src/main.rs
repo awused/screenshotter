@@ -68,6 +68,7 @@ pub static ENV_VARS: LazyLock<Mutex<HashMap<&'static str, OsString>>> =
 
 pub static OPTIONS: LazyLock<Opt> = LazyLock::new(Opt::parse);
 
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     elapsedlogger::init_logging();
@@ -78,13 +79,37 @@ async fn main() -> Result<()> {
     ENV_VARS.lock().unwrap().insert(MODE, OPTIONS.cmd.str().into());
 
     match &OPTIONS.cmd {
-        Command::Window => todo!(),
-        Command::Desktop => todo!(),
+        Command::Window => window().await,
+        Command::Desktop => desktop().await,
         Command::Region => todo!(),
         Command::Name => name().await,
         Command::Prop => prop().await,
         Command::VisibleWindows => visible().await,
     }
+}
+
+#[instrument(level = "error", skip_all)]
+async fn window() -> Result<()> {
+    trace!("Starting window");
+    LazyLock::force(&CONFIG);
+
+    let mut con = wayland::Conn::init(true, false)?;
+
+
+    con.poll().await?;
+    Ok(())
+}
+
+#[instrument(level = "error", skip_all)]
+async fn desktop() -> Result<()> {
+    trace!("Starting desktop");
+    LazyLock::force(&CONFIG);
+
+    let mut con = wayland::Conn::init(true, false)?;
+
+
+    con.poll().await?;
+    Ok(())
 }
 
 
