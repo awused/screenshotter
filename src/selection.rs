@@ -10,13 +10,14 @@ use crate::config::SLURP;
 use crate::ipc::Window;
 
 // A region in global logical pixels
-#[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize, Default)]
 pub struct Region {
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
 }
+
 
 #[instrument(level = "debug", skip_all)]
 pub fn region(windows: &[Window]) -> Result<Region> {
@@ -118,5 +119,9 @@ impl Region {
         } else {
             None
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        return self.width == 0 || self.height == 0;
     }
 }

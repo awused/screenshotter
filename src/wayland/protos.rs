@@ -18,6 +18,7 @@ use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_c
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
 use crate::wayland::{Format, State};
@@ -46,8 +47,10 @@ impl Buffer {
             self.buf.copy_to_nonoverlapping(out.as_mut_ptr().cast(), size);
         }
 
-        out.chunks_exact_mut(4).for_each(|c| c.swap(0, 2));
         println!("{:?}", start.elapsed());
+        out.chunks_exact_mut(4).for_each(|c| c.swap(0, 2));
+        // Bgra8
+        // ImageBuffer::from_raw_bgra(self.width as _, self.height as _, out)
         RgbaImage::from_raw(self.width as _, self.height as _, out)
             .ok_or_eyre("Can't construct image")
     }
@@ -62,6 +65,7 @@ pub struct Protos {
     pub shm: OnceCell<WlShm>,
     pub output_capture: OnceCell<ExtOutputImageCaptureSourceManagerV1>,
     pub image_copy: OnceCell<ExtImageCopyCaptureManagerV1>,
+    pub xdg_output: OnceCell<ZxdgOutputManagerV1>,
 }
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -151,6 +155,7 @@ proto_get!(layer_shell, ZwlrLayerShellV1);
 proto_get!(shm, WlShm);
 proto_get!(output_capture, ExtOutputImageCaptureSourceManagerV1);
 proto_get!(image_copy, ExtImageCopyCaptureManagerV1);
+proto_get!(xdg_output, ZxdgOutputManagerV1);
 
 impl Drop for Buffer {
     fn drop(&mut self) {

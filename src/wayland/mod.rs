@@ -10,11 +10,12 @@ use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_shm::{self, WlShm};
-use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy};
+use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy, QueueHandle};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
 use crate::wayland::output::Output;
@@ -215,7 +216,9 @@ impl Dispatch<WlRegistry, State> for Global {
                     }
 
                     let wl_output = reg.bind::<WlOutput, _, _>(name, 2, qh, OutputKey(name));
-                    let output = Output::new(wl_output);
+                    let xdg_output =
+                        state.protos.xdg_output().get_xdg_output(&wl_output, qh, OutputKey(name));
+                    let output = Output::new(wl_output, xdg_output);
                     state.outputs.insert(OutputKey(name), output);
                 } else if interface == WpFractionalScaleManagerV1::interface().name {
                     let fractional_manager =
@@ -228,7 +231,7 @@ impl Dispatch<WlRegistry, State> for Global {
                     let viewporter = reg.bind::<WpViewporter, _, _>(name, 1, qh, NoopIgnore);
                     state.protos.viewporter.set(viewporter).unwrap();
                 } else if interface == ZwlrLayerShellV1::interface().name {
-                    let layer_shell = reg.bind::<ZwlrLayerShellV1, _, _>(name, 1, qh, NoopIgnore);
+                    let layer_shell = reg.bind::<ZwlrLayerShellV1, _, _>(name, 4, qh, NoopIgnore);
                     state.protos.layer_shell.set(layer_shell).unwrap();
                 } else if interface == WlShm::interface().name {
                     let shm = reg.bind::<WlShm, _, _>(name, 1, qh, NoopIgnore);
@@ -242,6 +245,9 @@ impl Dispatch<WlRegistry, State> for Global {
                     let manager =
                         reg.bind::<ExtImageCopyCaptureManagerV1, _, _>(name, 1, qh, NoopIgnore);
                     state.protos.image_copy.set(manager).unwrap();
+                } else if interface == ZxdgOutputManagerV1::interface().name {
+                    let xdg_output = reg.bind::<ZxdgOutputManagerV1, _, _>(name, 3, qh, NoopIgnore);
+                    state.protos.xdg_output.set(xdg_output).unwrap();
                 }
             }
             wl_registry::Event::GlobalRemove { name } => {
