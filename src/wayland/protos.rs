@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::{OptionExt, bail};
-use image::RgbaImage;
+use image::{DynamicImage, RgbImage, RgbaImage};
 use libc::{MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE, close, ftruncate, shm_open, shm_unlink};
 use nix::errno::Errno;
 use wayland_client::NoopIgnore;
@@ -31,28 +31,38 @@ pub struct Buffer {
     format: Format,
     width: usize,
     height: usize,
+    // Buffer size in bytes
     buf_size: usize,
 }
 
 impl Buffer {
-    // Only handle 8 bit rgba for now
-    pub fn read(&self) -> Result<RgbaImage> {
-        let start = Instant::now();
-        let size = self.width * self.height * 4;
+    // Only handle 8 bit formats for now
+    // SAFETY: Buffer needs to be in a good state
+    pub unsafe fn read(&self) -> Result<DynamicImage> {
+        let size = self.width * self.height * self.format.size();
         let mut out = vec![0u8; size];
 
-        assert_eq!(self.format, Format::Argb8888);
-        assert!(size <= self.buf_size, "Image buffer larger than output buffer");
+        assert!(size <= self.buf_size, "Image buffer larger than capture buffer");
         unsafe {
             self.buf.copy_to_nonoverlapping(out.as_mut_ptr().cast(), size);
         }
 
-        println!("{:?}", start.elapsed());
-        out.chunks_exact_mut(4).for_each(|c| c.swap(0, 2));
-        // Bgra8
-        // ImageBuffer::from_raw_bgra(self.width as _, self.height as _, out)
-        RgbaImage::from_raw(self.width as _, self.height as _, out)
-            .ok_or_eyre("Can't construct image")
+        match self.format {
+            Format::Argb8888 => {
+                out.chunks_exact_mut(4).for_each(|c| c.swap(0, 2));
+                Ok(DynamicImage::ImageRgba8(
+                    RgbaImage::from_raw(self.width as _, self.height as _, out)
+                        .ok_or_eyre("Can't construct image")?,
+                ))
+            }
+            Format::Bgr888 => {
+                // TODO -- test if needs swizzling
+                Ok(DynamicImage::ImageRgb8(
+                    RgbImage::from_raw(self.width as _, self.height as _, out)
+                        .ok_or_eyre("Can't construct image")?,
+                ))
+            }
+        }
     }
 }
 

@@ -1,13 +1,14 @@
-use std::collections::BTreeMap;
+use std::cell::OnceCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{bail, eyre};
 use color_eyre::{Report, Result};
 use tokio::io::unix::AsyncFd;
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_compositor::WlCompositor;
-use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy, QueueHandle};
@@ -36,32 +37,56 @@ use crate::wayland::protos::Protos;
 
 struct Global;
 
+mod capture;
 mod output;
+mod overlay;
 mod protos;
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Ord, Eq)]
 struct OutputKey(u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+// Default order is top to bottom
 enum Format {
     Argb8888,
+    Bgr888,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Transform(wl_output::Transform);
+impl Transform {
+    const fn rotate(self) -> bool {
+        !self.0.0.is_multiple_of(2)
+    }
+
+    // TODO -- this is inconsistent between hyprland and sway, needs work.
+    const fn freeze_transform(self) -> wl_output::Transform {
+        match self.0.0 {
+            1 => wl_output::Transform::_270,
+            3 => wl_output::Transform::_90,
+            _ => self.0,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct State {
     // Expect to take a screenshot
     screenshot: bool,
     // Expect to perform selection
-    selection: bool,
+    select: bool,
     // Whether initial sync is done or not
     synced: bool,
-    // If some error happened and we need to die
-    error: Option<Report>,
+
+    // For now we only really support capturing the same format as we overlay
+    formats: BTreeSet<Format>,
 
     outputs: BTreeMap<OutputKey, Output>,
 
     protos: Protos,
+
+    // If some error happened and we need to die
+    error: Option<Report>,
 }
 
 impl State {
@@ -70,6 +95,48 @@ impl State {
         if let Err(e) = f(self) {
             self.error = Some(e);
         }
+    }
+
+    fn default_format(&self) -> Format {
+        *self.formats.iter().find(|f| f.transparent()).unwrap_or(&Format::Argb8888)
+    }
+
+    #[instrument(level = "error", skip(self, qh))]
+    fn try_freeze(&mut self, key: OutputKey, qh: &QueueHandle<Self>) -> Result<()> {
+        if !self.screenshot || !self.select {
+            return Ok(());
+        }
+
+        let output = self.outputs.get(&key).unwrap();
+        let (capture, overlay) = (&output.capture, &output.overlay);
+        if !capture.done {
+            return Ok(());
+        }
+
+        let Some(res) = overlay.initialized_res() else {
+            return Ok(());
+        };
+
+        debug!("Freezing output");
+
+        // TODO -- this might be okay if there are transforms to apply
+        if res != capture.transformed_res().unwrap() {
+            bail!(
+                "Got different capture and output resolutions. output: {res:?}, capture {:?}",
+                capture.res.get().unwrap()
+            );
+        }
+
+        let surface = overlay.freeze_surface.get().unwrap();
+        let viewport = overlay.freeze_port.get().unwrap();
+        let buffer = capture.buffer.get().unwrap();
+        let unscaled = *overlay.unscaled.get().unwrap();
+        surface.set_buffer_transform(capture.transform.get().unwrap().freeze_transform());
+
+        surface.attach(Some(&buffer.wl_buffer), 0, 0);
+        viewport.set_destination(unscaled.0 as _, unscaled.1 as _);
+        surface.commit();
+        Ok(())
     }
 }
 
@@ -82,8 +149,8 @@ pub struct Conn {
 
 impl Conn {
     #[instrument(level = "error", skip_all)]
-    pub fn init(screenshot: bool, selection: bool) -> Result<Self> {
-        assert!(screenshot || selection);
+    pub fn init(screenshot: bool, select: bool) -> Result<Self> {
+        assert!(screenshot || select);
         let con = Connection::connect_to_env()?;
         let display = con.display();
 
@@ -97,12 +164,15 @@ impl Conn {
             _registry,
             state: State {
                 screenshot,
-                selection,
+                select,
                 synced: false,
-                error: None,
+
+                formats: BTreeSet::default(),
                 outputs: BTreeMap::new(),
 
                 protos: Protos::default(),
+
+                error: None,
             },
         })
     }
@@ -116,7 +186,7 @@ impl Conn {
 
     pub async fn select(&mut self) -> Result<()> {
         // Can only select if we've been preparing for it
-        assert!(self.state.selection);
+        assert!(self.state.select);
 
         while !self.state.synced {
             self.poll_once().await?;
@@ -204,7 +274,7 @@ impl Dispatch<WlRegistry, State> for Global {
         state: &mut State,
         reg: &WlRegistry,
         event: <WlRegistry as wayland_client::Proxy>::Event,
-        conn: &Connection,
+        _conn: &Connection,
         qh: &wayland_client::QueueHandle<State>,
     ) {
         match event {
@@ -234,7 +304,7 @@ impl Dispatch<WlRegistry, State> for Global {
                     let layer_shell = reg.bind::<ZwlrLayerShellV1, _, _>(name, 4, qh, NoopIgnore);
                     state.protos.layer_shell.set(layer_shell).unwrap();
                 } else if interface == WlShm::interface().name {
-                    let shm = reg.bind::<WlShm, _, _>(name, 1, qh, NoopIgnore);
+                    let shm = reg.bind::<WlShm, _, _>(name, 1, qh, Self);
                     state.protos.shm.set(shm).unwrap();
                 } else if interface == ExtOutputImageCaptureSourceManagerV1::interface().name {
                     let manager = reg.bind::<ExtOutputImageCaptureSourceManagerV1, _, _>(
@@ -280,6 +350,28 @@ impl Dispatch<WlCallback, State> for Global {
         state.protos.shm.get().unwrap();
         state.protos.output_capture.get().unwrap();
         state.protos.image_copy.get().unwrap();
+        // state.format.get().unwrap();
+    }
+}
+
+impl Dispatch<WlShm, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlShm,
+        event: <WlShm as Proxy>::Event,
+        conn: &Connection,
+        qhandle: &QueueHandle<State>,
+    ) {
+        trace!("WlShm: {event:?}");
+        state.try_handle(|state| {
+            if let wl_shm::Event::Format { format } = event
+                && let Ok(format) = format.try_into()
+            {
+                state.formats.insert(format);
+            }
+            Ok(())
+        });
     }
 }
 
@@ -290,21 +382,38 @@ impl TryFrom<wl_shm::Format> for Format {
     fn try_from(value: wl_shm::Format) -> std::prelude::v1::Result<Self, ()> {
         match value {
             wl_shm::Format::Argb8888 => Ok(Self::Argb8888),
+            wl_shm::Format::Bgr888 => Ok(Self::Bgr888),
             _ => Err(()),
         }
     }
 }
 
 impl Format {
-    const fn size(&self) -> u32 {
+    const fn size(&self) -> usize {
         match self {
             Self::Argb8888 => 4,
+            Self::Bgr888 => 3,
+        }
+    }
+
+    const fn channels(&self) -> usize {
+        match self {
+            Self::Argb8888 => 4,
+            Self::Bgr888 => 3,
+        }
+    }
+
+    const fn transparent(&self) -> bool {
+        match self {
+            Self::Argb8888 => true,
+            Self::Bgr888 => false,
         }
     }
 
     const fn wl_format(&self) -> wl_shm::Format {
         match self {
             Self::Argb8888 => wl_shm::Format::Argb8888,
+            Self::Bgr888 => wl_shm::Format::Bgr888,
         }
     }
 }

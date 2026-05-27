@@ -7,7 +7,7 @@ use crate::OPTIONS;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Transform {
+pub enum Reformatter {
     Format(String),
     Delegate(PathBuf),
 }
@@ -21,7 +21,7 @@ pub struct Override {
     #[serde(default)]
     pub regex: Option<String>,
     #[serde(default, flatten)]
-    pub transform: Option<Transform>,
+    pub transform: Option<Reformatter>,
     #[serde(default)]
     pub yearly: bool,
     #[serde(default)]

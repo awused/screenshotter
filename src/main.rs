@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     match &OPTIONS.cmd {
         Command::Window => window().await,
         Command::Desktop => desktop().await,
-        Command::Region => todo!(),
+        Command::Region => region().await,
         Command::Name => name().await,
         Command::Prop => prop().await,
         Command::VisibleWindows => visible().await,
@@ -106,6 +106,18 @@ async fn desktop() -> Result<()> {
     LazyLock::force(&CONFIG);
 
     let mut con = wayland::Conn::init(true, false)?;
+
+
+    con.poll().await?;
+    Ok(())
+}
+
+#[instrument(level = "error", skip_all)]
+async fn region() -> Result<()> {
+    trace!("Starting region");
+    LazyLock::force(&CONFIG);
+
+    let mut con = wayland::Conn::init(true, true)?;
 
 
     con.poll().await?;

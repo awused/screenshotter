@@ -15,7 +15,7 @@ use sysinfo::{Pid, System};
 use tokio::task::{JoinHandle, spawn_blocking};
 
 use crate::ENV_VARS;
-use crate::config::{CONFIG, Override, Transform};
+use crate::config::{CONFIG, Override, Reformatter};
 use crate::ipc::Window;
 use crate::selection::Region;
 
@@ -221,7 +221,7 @@ fn run_override(
     // Delegate exiting with a failure is not fatal, but means it didn't match
 
     match &over.transform {
-        Some(Transform::Format(template)) => {
+        Some(Reformatter::Format(template)) => {
             let new_name = strfmt_map(template, |mut f| {
                 if let Some(caps) = &caps
                     && let Ok(g) = f.key.parse::<usize>()
@@ -236,7 +236,7 @@ fn run_override(
 
             app.relative_dir = convert_application_name(&new_name).into();
         }
-        Some(Transform::Delegate(delegate)) => match run_delegate(delegate) {
+        Some(Reformatter::Delegate(delegate)) => match run_delegate(delegate) {
             Ok(Some(path)) => {
                 debug!("Delegate matched with output: {path:?}");
                 app.relative_dir = path;
