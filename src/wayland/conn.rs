@@ -70,6 +70,7 @@ impl Conn {
                 protos: Protos::default(),
 
                 mouse: MouseState::default(),
+                keystate: None,
 
                 windows: Vec::new(),
 
@@ -255,8 +256,7 @@ impl Dispatch<WlRegistry, State> for Global {
                     let xdg_output = reg.bind::<ZxdgOutputManagerV1, _, _>(name, 3, qh, NoopIgnore);
                     state.protos.xdg_output.set(xdg_output).unwrap();
                 } else if interface == WlSeat::interface().name {
-                    let seat = reg.bind::<WlSeat, _, _>(name, 9, qh, Self);
-                    state.protos.seat.set(seat).unwrap();
+                    let _seat = reg.bind::<WlSeat, _, _>(name, 9, qh, Self);
                 }
             }
             Event::GlobalRemove { name } if state.outputs.remove(&OutputKey(name)).is_some() => {
@@ -291,7 +291,6 @@ impl Dispatch<WlCallback, State> for Global {
         state.protos.output_capture.get().unwrap();
         state.protos.image_copy.get().unwrap();
         state.protos.xdg_output.get().unwrap();
-        state.protos.seat.get().unwrap();
         // state.format.get().unwrap();
 
         state.try_handle(|state| {

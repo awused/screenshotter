@@ -11,7 +11,7 @@ use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1:
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
-    self, Anchor, ZwlrLayerSurfaceV1,
+    self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
 };
 
 use crate::util::MRegion;
@@ -64,9 +64,9 @@ impl Overlay {
             return;
         };
 
-        mag.position(mouse.x, mouse.y, *self.unscaled.get().unwrap(), monitor);
-
-        self.freeze_surface.commit();
+        if mag.position(mouse.x, mouse.y, *self.unscaled.get().unwrap(), monitor) {
+            self.freeze_surface.commit();
+        }
     }
 
     pub fn show_magnifier(&self, freeze_buffer: &Buffer, crosshair: &Buffer) {
@@ -113,6 +113,7 @@ impl Protos {
         layer_surface.set_size(0, 0);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Right | Anchor::Left);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
 
 
         let magnifier =

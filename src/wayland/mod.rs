@@ -1,14 +1,17 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use color_eyre::eyre::bail;
+use color_eyre::eyre::{OptionExt, bail, eyre};
 use color_eyre::{Report, Result};
+use wayland_client::protocol::wl_keyboard::{self, Event, KeyState, KeymapFormat, WlKeyboard};
 use wayland_client::protocol::wl_output::{self};
 use wayland_client::protocol::wl_pointer::{self, ButtonState, WlPointer};
 use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
 use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
+use xkbcommon::xkb::{Context, Keycode, Keymap, Keysym, State as XkbState};
 
 use crate::ipc::Window;
 use crate::wayland::output::Output;
@@ -98,7 +101,6 @@ impl SelectMode {
     }
 }
 
-#[derive(Debug)]
 struct State {
     // Expect to take a screenshot
     screenshot: bool,
@@ -115,6 +117,7 @@ struct State {
     protos: Protos,
 
     mouse: MouseState,
+    keystate: Option<XkbState>,
 
     windows: Vec<Window>,
 
@@ -243,6 +246,26 @@ impl State {
         };
 
         output.overlay.get().unwrap().move_magnifier(&self.mouse, &output.physical);
+
+        // if dragging {
+        // } else {
+        // }
+    }
+
+    fn handle_key(&self, key: u32) -> Result<()> {
+        let Some(ref keystate) = self.keystate else {
+            warn!("Got key press with no keymap, treating as escape");
+            bail!("Exit key pressed");
+        };
+
+        let key = keystate.key_get_one_sym(Keycode::new(key + 8));
+
+        match key {
+            Keysym::Escape | Keysym::Q | Keysym::q => {
+                bail!("Exit key pressed");
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -261,7 +284,7 @@ impl Dispatch<WlPointer, State> for Global {
 
         match event {
             Event::Enter { surface, surface_x, surface_y, .. } => {
-                trace!("WlPointer enter: {surface:?} {surface_x} {surface_y}");
+                debug!("WlPointer enter: {surface:?} {surface_x} {surface_y}");
                 if state.mouse.surface.as_ref() == Some(&surface) {
                     warn!("Mouse entered surface {surface:?} it was already in");
                 }
@@ -290,6 +313,65 @@ impl Dispatch<WlPointer, State> for Global {
             | Event::AxisRelativeDirection { .. }
             | _ => {}
         }
+    }
+}
+
+impl Dispatch<WlKeyboard, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlKeyboard,
+        event: <WlKeyboard as Proxy>::Event,
+        conn: &Connection,
+        qhandle: &QueueHandle<State>,
+    ) {
+        debug!("WlKeyboard: {event:?}");
+        use wl_keyboard::Event;
+
+        state.try_handle(|state| {
+            match event {
+                Event::Keymap { format, fd, size } => {
+                    let context = Context::new(0);
+
+                    if format == KeymapFormat::XkbV1 {
+                        let keymap = unsafe {
+                            Keymap::new_from_fd(
+                                &context,
+                                fd,
+                                size as _,
+                                XKB_KEYMAP_FORMAT_TEXT_V1,
+                                0,
+                            )?
+                            .ok_or_else(|| eyre!("Could not build keymap"))?
+                        };
+
+                        state.keystate = Some(XkbState::new(&keymap));
+                    } else if format == KeymapFormat::NoKeymap && state.keystate.is_none() {
+                        let keymap = Keymap::new_from_names(&context, "", "", "", "", None, 0)
+                            .ok_or_else(|| eyre!("Could not build keymap"))?;
+
+                        state.keystate = Some(XkbState::new(&keymap));
+                    }
+                }
+                Event::Enter { serial, surface, keys } => {}
+                Event::Leave { serial, surface } => {}
+                Event::Key { serial, time, key, state: key_state } => {
+                    if key_state == KeyState::Pressed {
+                        state.handle_key(key)?;
+                    }
+                }
+                Event::Modifiers {
+                    serial,
+                    mods_depressed,
+                    mods_latched,
+                    mods_locked,
+                    group,
+                } => {}
+                Event::RepeatInfo { rate, delay } => {}
+                _ => {}
+            }
+            Ok(())
+        });
     }
 }
 
@@ -332,12 +414,12 @@ impl Dispatch<WlSeat, State> for Global {
 
 
         if capabilities.contains(Capability::Pointer) {
-            state.protos.pointer.set(proxy.get_pointer(qh, Global)).unwrap();
+            proxy.get_pointer(qh, Self);
         }
 
-        // if capabilities.contains(Capability::Keyboard) {
-        //     proxy.get_keyboard(qh, Global);
-        // }
+        if capabilities.contains(Capability::Keyboard) {
+            proxy.get_keyboard(qh, Self);
+        }
     }
 }
 

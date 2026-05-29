@@ -83,8 +83,6 @@ pub struct Protos {
     pub output_capture: OnceCell<ExtOutputImageCaptureSourceManagerV1>,
     pub image_copy: OnceCell<ExtImageCopyCaptureManagerV1>,
     pub xdg_output: OnceCell<ZxdgOutputManagerV1>,
-    pub seat: OnceCell<WlSeat>,
-    pub pointer: OnceCell<WlPointer>,
 }
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -176,8 +174,6 @@ proto_get!(shm, WlShm);
 proto_get!(output_capture, ExtOutputImageCaptureSourceManagerV1);
 proto_get!(image_copy, ExtImageCopyCaptureManagerV1);
 proto_get!(xdg_output, ZxdgOutputManagerV1);
-proto_get!(seat, WlSeat);
-proto_get!(pointer, WlPointer);
 
 impl Drop for Buffer {
     fn drop(&mut self) {

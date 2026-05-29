@@ -31,6 +31,7 @@ toml = "1.1.2"
 wayland-protocols-wlr = { git = "https://github.com/Smithay/wayland-rs" , features = ["client"] }
 wayland-client = {git = "https://github.com/Smithay/wayland-rs"}
 wayland-protocols = { git = "https://github.com/Smithay/wayland-rs", features = ["client", "staging", "unstable"] }
+xkbcommon = { version = "0.9.0", features = ["wayland"]}
 
 
 # Tracing

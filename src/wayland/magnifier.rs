@@ -48,7 +48,7 @@ impl Magnifier {
     }
 
     // TODO[transform]
-    pub fn position(&self, x: f64, y: f64, bounds: (u32, u32), monitor: &MRegion) {
+    pub fn position(&self, x: f64, y: f64, bounds: (u32, u32), monitor: &MRegion) -> bool {
         let log_x = x.round() as i32;
         let log_y = y.round() as i32;
 
@@ -68,6 +68,11 @@ impl Magnifier {
         let scale = monitor.width as f64 / bounds.0 as f64;
         let true_x = (x * scale).trunc() as i32;
         let true_y = (y * scale).trunc() as i32;
+
+        if true_x < 0 || true_x >= monitor.width || true_y < 0 || true_y >= monitor.height {
+            // warn!("Got bogus mouse position {true_x},{true_y} in {monitor:?}, ignoring");
+            return false;
+        }
 
         let mut left = true_x - RES as i32 / 2;
         let mut right = true_x + RES as i32 / 2 + 1;
@@ -94,6 +99,8 @@ impl Magnifier {
         }
         // TODO -- adjust the output to compensate or don't bother?
 
+        // Bogus mouse event, just ignore it
+
 
         self.zoom_viewport.set_source(
             left as f64,
@@ -105,6 +112,7 @@ impl Magnifier {
 
         self.zoom_surface.commit();
         self.crosshair_surface.commit();
+        true
     }
 }
 
