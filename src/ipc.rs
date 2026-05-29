@@ -13,7 +13,9 @@ use {
 #[cfg(feature = "sway")]
 use {std::collections::VecDeque, swayipc::Connection, tokio::task::spawn_blocking};
 
-use crate::selection::Region;
+#[cfg(feature = "hyprland")]
+use crate::util::LRegion;
+
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -21,7 +23,7 @@ pub enum Window {
     #[cfg(feature = "sway")]
     Sway(swayipc::Node),
     #[cfg(feature = "hyprland")]
-    Hypr(hyprland::data::Client, Region),
+    Hypr(hyprland::data::Client, LRegion),
 }
 
 impl Window {
@@ -64,13 +66,13 @@ impl Window {
         }
     }
 
-    pub const fn region(&self) -> Region {
+    pub const fn region(&self) -> LRegion {
         match self {
             #[cfg(feature = "sway")]
             Self::Sway(node) => {
                 let x = node.rect.x + node.window_rect.x;
                 let y = node.rect.y + node.window_rect.y;
-                Region {
+                LRegion {
                     x,
                     y,
                     width: node.window_rect.width,
@@ -168,7 +170,7 @@ async fn hyprland() -> Result<Vec<Window>> {
         .filter(|c| c.visible && c.mapped && !c.hidden && c.accepts_input)
         .filter_map(|client| {
             let (workspace, monitor) = workspaces.get(&client.workspace.id)?;
-            let c_region = Region {
+            let c_region = LRegion {
                 x: client.at.0 as _,
                 y: client.at.1 as _,
                 width: client.size.0 as _,
@@ -177,7 +179,7 @@ async fn hyprland() -> Result<Vec<Window>> {
 
             // Windows can be completely invisible or partially offscreen
             if workspace.tiled_layout == "scrolling" && !client.floating {
-                let m_region = Region {
+                let m_region = LRegion {
                     x: monitor.x,
                     y: monitor.y,
 

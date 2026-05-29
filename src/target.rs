@@ -17,7 +17,7 @@ use tokio::task::{JoinHandle, spawn_blocking};
 use crate::ENV_VARS;
 use crate::config::{CONFIG, Override, Reformatter};
 use crate::ipc::Window;
-use crate::selection::Region;
+use crate::util::LRegion;
 
 
 const PREFIX: &str = "SCREENSHOTTER_";
@@ -71,7 +71,7 @@ impl ApplicationFinder {
     #[instrument(level = "error", skip_all)]
     pub async fn application_for(
         &mut self,
-        region: Region,
+        region: LRegion,
         window: Option<Window>,
     ) -> Result<Application> {
         let mut env = ENV_VARS.lock().unwrap();

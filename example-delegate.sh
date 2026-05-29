@@ -8,6 +8,6 @@
 # Do match "name", the application will be named "$SCREENSHOTTER_NAME"
 [ "$SCREENSHOTTER_MODE" = "name" ] && exit 0
 
-# Produces a nested directory like "firefox/window"
+# Produces a nested directory like "firefox/name"
 echo $SCREENSHOTTER_NAME
 echo $SCREENSHOTTER_MODE

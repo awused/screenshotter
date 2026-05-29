@@ -7,8 +7,8 @@ A tool to take screenshots and organize them based on the name of the applicatio
 
 Wayland version:
 * Sway or Hyprland
-* [slurp](https://github.com/emersion/slurp)
-* [grim](https://gitlab.freedesktop.org/emersion/grim)
+* Some features not yet implemented (handling output transformations)
+* As of 2026-05 the Wayland ecosystem is not in a a great state.
 
 Terminal emulators or other multiplexers that have multiple windows with the same process and children are not well supported on Wayland.
 
@@ -106,3 +106,7 @@ The selection logic for determining which application is running in a window loo
 
 If selecting a region spanning multiple visible windows the application will be based on the window under the mouse cursor (x11) or center of the region (wayland) when the user ends their selection.
 
+# Credit
+
+* [slurp](https://github.com/emersion/slurp) Used as a reference for some parts of the Wayland interface.
+* [grim](https://gitlab.freedesktop.org/emersion/grim)

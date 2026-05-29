@@ -13,16 +13,19 @@ use tokio::pin;
 use crate::config::CONFIG;
 use crate::ipc::Window;
 use crate::target::MODE;
-use crate::wayland::Conn;
+use crate::wayland::SelectMode;
+use crate::wayland::conn::Conn;
 
 #[macro_use]
 extern crate tracing;
 
 mod config;
 mod elapsedlogger;
+mod img;
 mod ipc;
 mod selection;
 mod target;
+mod util;
 mod wayland;
 
 #[derive(Debug, Parser)]
@@ -68,7 +71,6 @@ pub static ENV_VARS: LazyLock<Mutex<HashMap<&'static str, OsString>>> =
 
 pub static OPTIONS: LazyLock<Opt> = LazyLock::new(Opt::parse);
 
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     elapsedlogger::init_logging();
@@ -93,7 +95,7 @@ async fn window() -> Result<()> {
     trace!("Starting window");
     LazyLock::force(&CONFIG);
 
-    let mut con = wayland::Conn::init(true, false)?;
+    let mut con = Conn::init(true, SelectMode::Nothing)?;
 
 
     con.poll().await?;
@@ -105,7 +107,7 @@ async fn desktop() -> Result<()> {
     trace!("Starting desktop");
     LazyLock::force(&CONFIG);
 
-    let mut con = wayland::Conn::init(true, false)?;
+    let mut con = Conn::init(true, SelectMode::Nothing)?;
 
 
     con.poll().await?;
@@ -117,10 +119,11 @@ async fn region() -> Result<()> {
     trace!("Starting region");
     LazyLock::force(&CONFIG);
 
-    let mut con = wayland::Conn::init(true, true)?;
+    let mut con = Conn::init(true, SelectMode::Region)?;
+    let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
+    let selection = con.select(windows).await?;
 
-    con.poll().await?;
     Ok(())
 }
 
@@ -130,7 +133,7 @@ async fn name() -> Result<()> {
     trace!("Starting name");
     LazyLock::force(&CONFIG);
     let mut finder = target::ApplicationFinder::init();
-    let mut con = wayland::Conn::init(false, true)?;
+    let mut con = Conn::init(false, SelectMode::Window)?;
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
 
@@ -155,7 +158,7 @@ async fn name() -> Result<()> {
 #[instrument(level = "error", skip_all)]
 async fn prop() -> Result<()> {
     trace!("Starting prop");
-    let mut con = wayland::Conn::init(false, true)?;
+    let mut con = Conn::init(false, SelectMode::Region)?;
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
     let region = selection::region(&windows)?;

@@ -3,7 +3,6 @@ use std::ffi::{CString, c_void};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::{OptionExt, bail};
@@ -13,7 +12,10 @@ use nix::errno::Errno;
 use wayland_client::NoopIgnore;
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_pointer::WlPointer;
+use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_shm::WlShm;
+use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
@@ -32,8 +34,12 @@ pub struct Buffer {
     width: usize,
     height: usize,
     // Buffer size in bytes
-    buf_size: usize,
+    pub buf_size: usize,
 }
+
+// It's safe to read the buffer from another thread, but not if it's being written to on the
+// wayland end.
+//unsafe impl Sync for Buffer {}
 
 impl Buffer {
     // Only handle 8 bit formats for now
@@ -69,6 +75,7 @@ impl Buffer {
 #[derive(Debug, Default)]
 pub struct Protos {
     pub compositor: OnceCell<WlCompositor>,
+    pub subcompositor: OnceCell<WlSubcompositor>,
     pub fractional: OnceCell<WpFractionalScaleManagerV1>,
     pub viewporter: OnceCell<WpViewporter>,
     pub layer_shell: OnceCell<ZwlrLayerShellV1>,
@@ -76,6 +83,8 @@ pub struct Protos {
     pub output_capture: OnceCell<ExtOutputImageCaptureSourceManagerV1>,
     pub image_copy: OnceCell<ExtImageCopyCaptureManagerV1>,
     pub xdg_output: OnceCell<ZxdgOutputManagerV1>,
+    pub seat: OnceCell<WlSeat>,
+    pub pointer: OnceCell<WlPointer>,
 }
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -159,6 +168,7 @@ macro_rules! proto_get {
 }
 
 proto_get!(compositor, WlCompositor);
+proto_get!(subcompositor, WlSubcompositor);
 proto_get!(fractional, WpFractionalScaleManagerV1);
 proto_get!(viewporter, WpViewporter);
 proto_get!(layer_shell, ZwlrLayerShellV1);
@@ -166,6 +176,8 @@ proto_get!(shm, WlShm);
 proto_get!(output_capture, ExtOutputImageCaptureSourceManagerV1);
 proto_get!(image_copy, ExtImageCopyCaptureManagerV1);
 proto_get!(xdg_output, ZxdgOutputManagerV1);
+proto_get!(seat, WlSeat);
+proto_get!(pointer, WlPointer);
 
 impl Drop for Buffer {
     fn drop(&mut self) {

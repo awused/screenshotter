@@ -159,7 +159,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, State> for OutputKey {
                     capture.session.take().unwrap().destroy();
                     capture.frame.take().unwrap().destroy();
 
-                    state.try_freeze(*self, qhandle)?;
+                    state.try_freeze(*self)?;
                 }
                 Event::Failed { reason } => bail!("Screenshot failed for {self:?} {reason:?}"),
                 Event::Damage { .. } | Event::PresentationTime { .. } | _ => {}

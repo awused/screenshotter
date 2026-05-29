@@ -49,6 +49,9 @@ pub struct Config {
 
     #[serde(default, deserialize_with = "empty_path_is_none")]
     pub slurp: Option<PathBuf>,
+
+    #[serde(default)]
+    pub timeout: u64,
 }
 
 

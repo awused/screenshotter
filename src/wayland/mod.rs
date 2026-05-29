@@ -1,26 +1,18 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
 
-use color_eyre::eyre::{bail, eyre};
+use color_eyre::eyre::bail;
 use color_eyre::{Report, Result};
-use tokio::io::unix::AsyncFd;
-use wayland_client::backend::WaylandError;
-use wayland_client::protocol::wl_callback::WlCallback;
-use wayland_client::protocol::wl_compositor::WlCompositor;
-use wayland_client::protocol::wl_output::{self, WlOutput};
-use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_output::{self};
+use wayland_client::protocol::wl_pointer::{self, ButtonState, WlPointer};
+use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
 use wayland_client::protocol::wl_shm::{self, WlShm};
-use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy, QueueHandle};
-use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
-use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
-use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
-use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 
+use crate::ipc::Window;
 use crate::wayland::output::Output;
-use crate::wayland::protos::Protos;
+use crate::wayland::protos::{Buffer, Protos};
 
 // Slightly nicer than state.try_handle but doesn't get formatted
 // macro_rules! try_handle {
@@ -38,12 +30,15 @@ use crate::wayland::protos::Protos;
 struct Global;
 
 mod capture;
+pub mod conn;
+mod magnifier;
 mod output;
 mod overlay;
 mod protos;
+mod select;
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Ord, Eq)]
-struct OutputKey(u32);
+pub struct OutputKey(u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 // Default order is top to bottom
@@ -54,6 +49,7 @@ enum Format {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Transform(wl_output::Transform);
+
 impl Transform {
     const fn rotate(self) -> bool {
         !self.0.0.is_multiple_of(2)
@@ -69,27 +65,84 @@ impl Transform {
     }
 }
 
+#[derive(Debug, Default)]
+struct MouseState {
+    // Local within the given surface
+    x: f64,
+    y: f64,
+    output: Option<OutputKey>,
+    surface: Option<WlSurface>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Status {
+    Initializing,
+    Waiting,
+    Selecting,
+    Done,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SelectMode {
+    Nothing,
+    Region,
+    Window,
+}
+
+impl SelectMode {
+    pub const fn sel(self) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Region | Self::Window => true,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct State {
     // Expect to take a screenshot
     screenshot: bool,
     // Expect to perform selection
-    select: bool,
-    // Whether initial sync is done or not
-    synced: bool,
+    select: SelectMode,
+    status: Status,
 
     // For now we only really support capturing the same format as we overlay
     formats: BTreeSet<Format>,
-
     outputs: BTreeMap<OutputKey, Output>,
 
+    magnifier_crosshairs: OnceCell<Buffer>,
+
     protos: Protos,
+
+    mouse: MouseState,
+
+    windows: Vec<Window>,
 
     // If some error happened and we need to die
     error: Option<Report>,
 }
 
 impl State {
+    fn update_status(&mut self) {
+        match self.status {
+            Status::Selecting | Status::Initializing | Status::Done => {}
+            Status::Waiting => {
+                let pending_shots =
+                    self.screenshot && self.outputs.values().any(|o| !o.capture.done);
+                let pending_overlays = self.select.sel()
+                    && self.outputs.values().any(|o| o.overlay.get().is_none_or(|o| !o.ready()));
+
+                if !pending_shots && !pending_overlays {
+                    if self.select.sel() {
+                        self.status = Status::Selecting
+                    } else {
+                        self.status = Status::Done
+                    }
+                }
+            }
+        }
+    }
+
     #[instrument(level = "error", skip_all)]
     fn try_handle(&mut self, f: impl FnOnce(&mut Self) -> Result<()>) {
         if let Err(e) = f(self) {
@@ -97,24 +150,25 @@ impl State {
         }
     }
 
-    fn default_format(&self) -> Format {
+    fn transparent_format(&self) -> Format {
         *self.formats.iter().find(|f| f.transparent()).unwrap_or(&Format::Argb8888)
     }
 
-    #[instrument(level = "error", skip(self, qh))]
-    fn try_freeze(&mut self, key: OutputKey, qh: &QueueHandle<Self>) -> Result<()> {
-        if !self.screenshot || !self.select {
-            return Ok(());
+    // Returns Ok(false) if there's pending work and it needs to be called later
+    #[instrument(level = "error", skip(self))]
+    fn try_freeze(&mut self, key: OutputKey) -> Result<bool> {
+        if !self.screenshot || !self.select.sel() {
+            return Ok(true);
         }
 
-        let output = self.outputs.get(&key).unwrap();
-        let (capture, overlay) = (&output.capture, &output.overlay);
+        let output = &self.outputs[&key];
+        let (capture, overlay) = (&output.capture, &output.overlay.get().unwrap());
         if !capture.done {
-            return Ok(());
+            return Ok(false);
         }
 
         let Some(res) = overlay.initialized_res() else {
-            return Ok(());
+            return Ok(false);
         };
 
         debug!("Freezing output");
@@ -127,241 +181,127 @@ impl State {
             );
         }
 
-        let surface = overlay.freeze_surface.get().unwrap();
-        let viewport = overlay.freeze_port.get().unwrap();
+        let surface = &overlay.freeze_surface;
+        let viewport = &overlay.freeze_port;
         let buffer = capture.buffer.get().unwrap();
         let unscaled = *overlay.unscaled.get().unwrap();
         surface.set_buffer_transform(capture.transform.get().unwrap().freeze_transform());
 
         surface.attach(Some(&buffer.wl_buffer), 0, 0);
+        // viewport.set_source(0.0, 0.0, 0.6, 0.6);
         viewport.set_destination(unscaled.0 as _, unscaled.1 as _);
+
         surface.commit();
-        Ok(())
-    }
-}
-
-pub struct Conn {
-    queue: EventQueue<State>,
-    _registry: WlRegistry,
-    state: State,
-}
-
-
-impl Conn {
-    #[instrument(level = "error", skip_all)]
-    pub fn init(screenshot: bool, select: bool) -> Result<Self> {
-        assert!(screenshot || select);
-        let con = Connection::connect_to_env()?;
-        let display = con.display();
-
-        let queue = con.new_event_queue();
-        let _registry = display.get_registry(&queue.handle(), Global);
-
-        display.sync(&queue.handle(), Global);
-
-        Ok(Self {
-            queue,
-            _registry,
-            state: State {
-                screenshot,
-                select,
-                synced: false,
-
-                formats: BTreeSet::default(),
-                outputs: BTreeMap::new(),
-
-                protos: Protos::default(),
-
-                error: None,
-            },
-        })
+        Ok(true)
     }
 
-    #[instrument(level = "error", skip_all)]
-    pub async fn poll(&mut self) -> Result<()> {
-        loop {
-            self.poll_once().await?;
-        }
+    fn start_selection(&mut self, windows: Vec<Window>) {
+        self.windows = windows;
+        // Apply the pointer, if we've had an event.
+        // If there's no event we do _not_ select 0,0 like slop
+        self.pointer_frame();
     }
 
-    pub async fn select(&mut self) -> Result<()> {
-        // Can only select if we've been preparing for it
-        assert!(self.state.select);
-
-        while !self.state.synced {
-            self.poll_once().await?;
+    fn pointer_leave(&mut self, surface: WlSurface) {
+        trace!("WlPointer leave: {surface:?}");
+        if self.mouse.surface.as_ref() != Some(&surface) {
+            warn!("Mouse left surface {surface:?} it wasn't in");
         }
 
-        todo!()
+        self.mouse.surface = None;
+        let Some(out) = self.mouse.output.take() else {
+            return;
+        };
+        self.outputs[&out].overlay.get().unwrap().hide_magnifier();
     }
 
-    fn flush(&self) -> Result<()> {
-        if let Err(e) = self.queue.flush()
-            && !ignore_wayland(&e)
-        {
-            return Err(e.into());
+    fn pointer_button(&mut self, time: u32, button: u32, b_state: ButtonState) {}
+
+    // Don't handle enter/leave/motion immediately since they can be part of the same event
+    fn pointer_frame(&mut self) {
+        if self.status != Status::Selecting {
+            return;
         }
-        Ok(())
-    }
 
-    #[instrument(level = "error", skip_all)]
-    async fn poll_once(&mut self) -> Result<()> {
-        self.flush()?;
+        let Some(ref surface) = self.mouse.surface else { return };
 
-        'outer: {
-            let Some(guard) = self.queue.prepare_read() else {
-                break 'outer;
-            };
+        let output = if let Some(outkey) = self.mouse.output {
+            &self.outputs[&outkey]
+        } else {
+            let (key, output) = self
+                .outputs
+                .iter()
+                .find(|(_k, v)| v.overlay.get().unwrap().freeze_surface == *surface)
+                .unwrap();
+            self.mouse.output = Some(*key);
 
-            let mut fd = AsyncFd::new(guard.connection_fd())?;
-            if let Err(e) = fd.readable_mut().await {
-                println!("Got socket error {e}");
-                if ignore_error(&e) {
-                    break 'outer;
-                }
-                return Err(e.into());
+            if let Some(crosshair) = self.magnifier_crosshairs.get() {
+                let freeze_buffer = output.capture.buffer.get().unwrap();
+                output.overlay.get().unwrap().show_magnifier(freeze_buffer, crosshair);
             }
+            output
+        };
 
-            drop(fd);
-            if let Err(e) = guard.read()
-                && !ignore_wayland(&e)
-            {
-                return Err(e.into());
-            }
-        }
-
-        if let Err(e) = self.queue.dispatch_pending(&mut self.state)
-            && !ignore_dispatch(&e)
-        {
-            return Err(e.into());
-        }
-
-        if let Some(e) = self.state.error.take() {
-            return Err(e);
-        }
-
-        Ok(())
+        output.overlay.get().unwrap().move_magnifier(&self.mouse, &output.physical);
     }
 }
 
-fn ignore_dispatch(error: &DispatchError) -> bool {
-    if let DispatchError::Backend(e) = error
-        && ignore_wayland(e)
-    {
-        true
-    } else {
-        false
-    }
-}
-
-fn ignore_wayland(error: &WaylandError) -> bool {
-    if let WaylandError::Io(e) = error
-        && ignore_error(e)
-    {
-        true
-    } else {
-        false
-    }
-}
-
-fn ignore_error(error: &std::io::Error) -> bool {
-    error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::Interrupted
-}
-
-impl Dispatch<WlRegistry, State> for Global {
+impl Dispatch<WlPointer, State> for Global {
     fn event(
         &self,
         state: &mut State,
-        reg: &WlRegistry,
-        event: <WlRegistry as wayland_client::Proxy>::Event,
-        _conn: &Connection,
-        qh: &wayland_client::QueueHandle<State>,
+        proxy: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        conn: &Connection,
+        qhandle: &QueueHandle<State>,
     ) {
+        // These ones are just too spammy to bother
+        // trace!("WlPointer {event:?}");
+        use wl_pointer::Event;
+
         match event {
-            wl_registry::Event::Global { name, interface, .. } => {
-                if interface == WlOutput::interface().name {
-                    if state.synced {
-                        state.error = Some(eyre!("Got new output after initial sync, exiting"));
-                        return;
-                    }
-
-                    let wl_output = reg.bind::<WlOutput, _, _>(name, 2, qh, OutputKey(name));
-                    let xdg_output =
-                        state.protos.xdg_output().get_xdg_output(&wl_output, qh, OutputKey(name));
-                    let output = Output::new(wl_output, xdg_output);
-                    state.outputs.insert(OutputKey(name), output);
-                } else if interface == WpFractionalScaleManagerV1::interface().name {
-                    let fractional_manager =
-                        reg.bind::<WpFractionalScaleManagerV1, _, _>(name, 1, qh, NoopIgnore);
-                    state.protos.fractional.set(fractional_manager).unwrap();
-                } else if interface == WlCompositor::interface().name {
-                    let compositor = reg.bind::<WlCompositor, _, _>(name, 6, qh, NoopIgnore);
-                    state.protos.compositor.set(compositor).unwrap();
-                } else if interface == WpViewporter::interface().name {
-                    let viewporter = reg.bind::<WpViewporter, _, _>(name, 1, qh, NoopIgnore);
-                    state.protos.viewporter.set(viewporter).unwrap();
-                } else if interface == ZwlrLayerShellV1::interface().name {
-                    let layer_shell = reg.bind::<ZwlrLayerShellV1, _, _>(name, 4, qh, NoopIgnore);
-                    state.protos.layer_shell.set(layer_shell).unwrap();
-                } else if interface == WlShm::interface().name {
-                    let shm = reg.bind::<WlShm, _, _>(name, 1, qh, Self);
-                    state.protos.shm.set(shm).unwrap();
-                } else if interface == ExtOutputImageCaptureSourceManagerV1::interface().name {
-                    let manager = reg.bind::<ExtOutputImageCaptureSourceManagerV1, _, _>(
-                        name, 1, qh, NoopIgnore,
-                    );
-                    state.protos.output_capture.set(manager).unwrap();
-                } else if interface == ExtImageCopyCaptureManagerV1::interface().name {
-                    let manager =
-                        reg.bind::<ExtImageCopyCaptureManagerV1, _, _>(name, 1, qh, NoopIgnore);
-                    state.protos.image_copy.set(manager).unwrap();
-                } else if interface == ZxdgOutputManagerV1::interface().name {
-                    let xdg_output = reg.bind::<ZxdgOutputManagerV1, _, _>(name, 3, qh, NoopIgnore);
-                    state.protos.xdg_output.set(xdg_output).unwrap();
+            Event::Enter { surface, surface_x, surface_y, .. } => {
+                trace!("WlPointer enter: {surface:?} {surface_x} {surface_y}");
+                if state.mouse.surface.as_ref() == Some(&surface) {
+                    warn!("Mouse entered surface {surface:?} it was already in");
                 }
+                state.mouse.output = None;
+                state.mouse.surface = Some(surface);
+                state.mouse.x = surface_x;
+                state.mouse.y = surface_y;
             }
-            wl_registry::Event::GlobalRemove { name } => {
-                println!(
-                    "Removing {name}, was known output: {}",
-                    state.outputs.remove(&OutputKey(name)).is_some()
-                );
+            Event::Leave { surface, .. } => {
+                state.pointer_leave(surface);
             }
-            _ => {}
+            Event::Motion { surface_x, surface_y, .. } => {
+                state.mouse.x = surface_x;
+                state.mouse.y = surface_y;
+            }
+            Event::Frame => state.pointer_frame(),
+            Event::Button { time, button, state: button_state, .. } => {
+                trace!("WlPointer button: {button:?} {button_state:?}");
+                state.pointer_button(time, button, button_state);
+            }
+            Event::Axis { .. }
+            | Event::AxisSource { .. }
+            | Event::AxisStop { .. }
+            | Event::AxisDiscrete { .. }
+            | Event::AxisValue120 { .. }
+            | Event::AxisRelativeDirection { .. }
+            | _ => {}
         }
     }
 }
 
-impl Dispatch<WlCallback, State> for Global {
-    fn event(
-        &self,
-        state: &mut State,
-        _proxy: &WlCallback,
-        _event: <WlCallback as wayland_client::Proxy>::Event,
-        _conn: &Connection,
-        _qhandle: &wayland_client::QueueHandle<State>,
-    ) {
-        debug!("Finished syncing global state");
-        state.synced = true;
-        // Die if any of these are not initialized
-        state.protos.compositor.get().unwrap();
-        state.protos.fractional.get().unwrap();
-        state.protos.viewporter.get().unwrap();
-        state.protos.layer_shell.get().unwrap();
-        state.protos.shm.get().unwrap();
-        state.protos.output_capture.get().unwrap();
-        state.protos.image_copy.get().unwrap();
-        // state.format.get().unwrap();
-    }
-}
 
 impl Dispatch<WlShm, State> for Global {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlShm,
+        _proxy: &WlShm,
         event: <WlShm as Proxy>::Event,
-        conn: &Connection,
-        qhandle: &QueueHandle<State>,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<State>,
     ) {
         trace!("WlShm: {event:?}");
         state.try_handle(|state| {
@@ -375,6 +315,31 @@ impl Dispatch<WlShm, State> for Global {
     }
 }
 
+impl Dispatch<WlSeat, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlSeat,
+        event: <WlSeat as Proxy>::Event,
+        conn: &Connection,
+        qh: &QueueHandle<State>,
+    ) {
+        trace!("WlSeat: {event:?}");
+
+        let wl_seat::Event::Capabilities { capabilities } = event else {
+            return;
+        };
+
+
+        if capabilities.contains(Capability::Pointer) {
+            state.protos.pointer.set(proxy.get_pointer(qh, Global)).unwrap();
+        }
+
+        // if capabilities.contains(Capability::Keyboard) {
+        //     proxy.get_keyboard(qh, Global);
+        // }
+    }
+}
 
 impl TryFrom<wl_shm::Format> for Format {
     type Error = ();
@@ -389,28 +354,21 @@ impl TryFrom<wl_shm::Format> for Format {
 }
 
 impl Format {
-    const fn size(&self) -> usize {
+    const fn size(self) -> usize {
         match self {
             Self::Argb8888 => 4,
             Self::Bgr888 => 3,
         }
     }
 
-    const fn channels(&self) -> usize {
-        match self {
-            Self::Argb8888 => 4,
-            Self::Bgr888 => 3,
-        }
-    }
-
-    const fn transparent(&self) -> bool {
+    const fn transparent(self) -> bool {
         match self {
             Self::Argb8888 => true,
             Self::Bgr888 => false,
         }
     }
 
-    const fn wl_format(&self) -> wl_shm::Format {
+    const fn wl_format(self) -> wl_shm::Format {
         match self {
             Self::Argb8888 => wl_shm::Format::Argb8888,
             Self::Bgr888 => wl_shm::Format::Bgr888,
