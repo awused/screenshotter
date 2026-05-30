@@ -72,7 +72,7 @@ impl ApplicationFinder {
     pub async fn application_for(
         &mut self,
         region: LRegion,
-        window: Option<Window>,
+        window: Option<&Window>,
     ) -> Result<Application> {
         let mut env = ENV_VARS.lock().unwrap();
         env.insert(GEOMETRY, region.to_string().into());

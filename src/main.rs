@@ -1,3 +1,5 @@
+#![allow(unused)] // TODO remove
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -5,6 +7,7 @@ use std::sync::{LazyLock, Mutex};
 
 use clap::Parser;
 use color_eyre::Result;
+use color_eyre::eyre::bail;
 use futures::future::{Either, select};
 use notify_rust::{Notification, Urgency};
 use serde_json::Value;
@@ -137,10 +140,13 @@ async fn name() -> Result<()> {
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
 
-    let region = selection::region(&windows)?;
-    let window = region.best_window(windows);
+    let selection = con.select(windows).await?;
+    let FinalSelection::Window(window) = selection else {
+        bail!("No window selected");
+    };
+
     debug!("Found window {window:?}");
-    let app = finder.application_for(region, window).await?;
+    let app = finder.application_for(window.region(), Some(window)).await?;
     let target = app.relative_dir.to_string_lossy();
 
     Notification::new()
