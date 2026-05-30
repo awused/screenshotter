@@ -1,3 +1,4 @@
+use std::mem::swap;
 use std::time::Instant;
 
 use color_eyre::Result;
@@ -6,7 +7,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{NoopIgnore, QueueHandle};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
-use crate::util::MRegion;
+use crate::util::{MRegion, Monitor};
 use crate::wayland::State;
 use crate::wayland::protos::{Buffer, Protos};
 
@@ -24,9 +25,6 @@ pub struct Magnifier {
     pub crosshair_surface: WlSurface,
     pub crosshair_subsurface: WlSubsurface,
     pub crosshair_viewport: WpViewport,
-
-    // Whether it's in the drawn state or not
-    drawn: bool,
 }
 
 impl Magnifier {
@@ -48,7 +46,7 @@ impl Magnifier {
     }
 
     // TODO[transform]
-    pub fn position(&self, x: f64, y: f64, bounds: (u32, u32), monitor: &MRegion) -> bool {
+    pub fn position(&self, x: f64, y: f64, mut bounds: (u32, u32), monitor: &Monitor) -> bool {
         let log_x = x.round() as i32;
         let log_y = y.round() as i32;
 
@@ -62,14 +60,26 @@ impl Magnifier {
             pos_y = log_y + PADDING;
         }
 
+        self.zoom_surface.set_buffer_transform(monitor.transform.freeze_transform());
+        // TODO -- investigate more
+        // seems like the right position, but it glitches out outside of the untransformed bounds
+        // Compositor bug?
         self.zoom_subsurface.set_position(pos_x, pos_y);
         self.crosshair_subsurface.set_position(pos_x, pos_y);
 
-        let scale = monitor.width as f64 / bounds.0 as f64;
-        let true_x = (x * scale).trunc() as i32;
-        let true_y = (y * scale).trunc() as i32;
+        let scale = monitor.scale;
+        let mut true_x = (x * scale).trunc() as i32;
+        let mut true_y = (y * scale).trunc() as i32;
+        // TODO -- more handling, this is just to avoid crashes
+        if monitor.transform.rotate() {
+            swap(&mut true_x, &mut true_y);
+        }
 
-        if true_x < 0 || true_x >= monitor.width || true_y < 0 || true_y >= monitor.height {
+        if true_x < 0
+            || true_x >= monitor.physical.width
+            || true_y < 0
+            || true_y >= monitor.physical.height
+        {
             // warn!("Got bogus mouse position {true_x},{true_y} in {monitor:?}, ignoring");
             return false;
         }
@@ -84,23 +94,20 @@ impl Magnifier {
             right += left;
             left = 0;
         }
-        if right >= monitor.width {
-            left += right - (monitor.width + 1);
-            right = monitor.width - 1;
+        if right >= monitor.physical.width {
+            left += right - (monitor.physical.width + 1);
+            right = monitor.physical.width - 1;
         }
 
         if top < 0 {
             bottom += top;
             top = 0;
         }
-        if bottom >= monitor.height {
-            top += bottom - (monitor.height + 1);
-            bottom = monitor.height - 1;
+        if bottom >= monitor.physical.height {
+            top += bottom - (monitor.physical.height + 1);
+            bottom = monitor.physical.height - 1;
         }
         // TODO -- adjust the output to compensate or don't bother?
-
-        // Bogus mouse event, just ignore it
-
 
         self.zoom_viewport.set_source(
             left as f64,
@@ -151,8 +158,6 @@ impl Protos {
             crosshair_surface,
             crosshair_subsurface,
             crosshair_viewport,
-
-            drawn: false,
         })
     }
 }
@@ -161,7 +166,10 @@ impl Protos {
 pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buffer> {
     let start = Instant::now();
     let format = state.transparent_format();
-    let buffer = state.protos.create_buffer(qhandle, format, LARGE_RES as _, LARGE_RES as _)?;
+    let buffer =
+        state
+            .protos
+            .create_buffer(qhandle, format, LARGE_RES as _, LARGE_RES as _, NoopIgnore)?;
 
     let stride = format.size() * LARGE_RES;
     let size = stride * LARGE_RES;
@@ -209,13 +217,10 @@ pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buf
         drawing[start..start + pixel.len()].copy_from_slice(&pixel);
     }
 
-    // println!("Drew crosshair in {:?}", start.elapsed());
-
     unsafe {
         assert_eq!(size, buffer.buf_size);
         buffer.buf.copy_from_nonoverlapping(drawing.as_ptr().cast(), size);
     }
-    println!("Drew+Copied crosshair in {:?}", start.elapsed());
 
     Ok(buffer)
 }

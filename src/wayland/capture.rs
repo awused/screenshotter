@@ -1,9 +1,8 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 use color_eyre::eyre::{bail, eyre};
-use wayland_client::Dispatch;
+use wayland_client::{Dispatch, NoopIgnore};
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::{
     self, ExtImageCopyCaptureFrameV1,
 };
@@ -24,7 +23,7 @@ pub struct Capture {
     frame: OnceCell<ExtImageCopyCaptureFrameV1>,
 
     // TODO -- test transforms or remove
-    pub transform: OnceCell<Transform>,
+    pub transform: Transform,
 
     pub buffer: OnceCell<Buffer>,
 
@@ -34,8 +33,7 @@ pub struct Capture {
 impl Capture {
     pub fn transformed_res(&self) -> Option<(i32, i32)> {
         let res = *self.res.get()?;
-        let transform = self.transform.get()?;
-        if transform.rotate() {
+        if self.transform.rotate() {
             // 90/270 rotations
             return Some((res.1, res.0));
         }
@@ -98,7 +96,8 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, State> for OutputKey {
 
                     let (width, height) = *capture.res.get().unwrap();
 
-                    let buffer = state.protos.create_buffer(qhandle, format, width, height)?;
+                    let buffer =
+                        state.protos.create_buffer(qhandle, format, width, height, NoopIgnore)?;
                     frame.attach_buffer(&buffer.wl_buffer);
                     frame.damage_buffer(0, 0, width as _, height as _);
                     frame.capture();
@@ -123,10 +122,10 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, State> for OutputKey {
     fn event(
         &self,
         state: &mut State,
-        proxy: &ExtImageCopyCaptureFrameV1,
+        _proxy: &ExtImageCopyCaptureFrameV1,
         event: <ExtImageCopyCaptureFrameV1 as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
-        qhandle: &wayland_client::QueueHandle<State>,
+        _conn: &wayland_client::Connection,
+        qh: &wayland_client::QueueHandle<State>,
     ) {
         trace!("ImageCopyCaptureFrame: {self:?} {event:?}");
         use ext_image_copy_capture_frame_v1::Event;
@@ -140,26 +139,23 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, State> for OutputKey {
             }
 
             match event {
-                Event::Transform { transform } => capture
-                    .transform
-                    .set(Transform(transform))
-                    .map_err(|_| eyre!("Capture frame reconfigured for {self:?} {output:?}"))?,
+                // Event::Transform { transform } => capture
+                //     .transform
+                //     .set(Transform(transform))
+                //     .map_err(|_| eyre!("Capture frame reconfigured for {self:?} {output:?}"))?,
                 Event::Ready => {
                     if capture.done {
                         bail!("Got second ready for {self:?}, {output:?})");
                     }
                     capture.done = true;
-                    let start = Instant::now();
                     // Just got a Ready event, we can read
-                    let image = unsafe { capture.buffer.get().unwrap().read()? };
-                    println!("{:?}", start.elapsed());
+                    // let image = unsafe { capture.buffer.get().unwrap().read()? };
 
-                    image.save(format!("/tmp/screenshotter/{}.pnm", self.0))?;
-                    println!("{:?}", start.elapsed());
+                    // image.save(format!("/tmp/screenshotter/{}.pnm", self.0))?;
                     capture.session.take().unwrap().destroy();
                     capture.frame.take().unwrap().destroy();
 
-                    state.try_freeze(*self)?;
+                    state.try_finish_overlay(qh, *self)?;
                 }
                 Event::Failed { reason } => bail!("Screenshot failed for {self:?} {reason:?}"),
                 Event::Damage { .. } | Event::PresentationTime { .. } | _ => {}

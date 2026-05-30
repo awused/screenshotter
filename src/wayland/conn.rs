@@ -18,6 +18,7 @@ use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
@@ -27,7 +28,7 @@ use crate::config::CONFIG;
 use crate::ipc::Window;
 use crate::wayland::output::Output;
 use crate::wayland::protos::Protos;
-use crate::wayland::{Global, MouseState, OutputKey, SelectMode, State, Status, magnifier};
+use crate::wayland::{FinalSelection, Global, MouseState, OutputKey, SelectMode, SelectState, State, Status, magnifier};
 
 pub struct Conn {
     queue: EventQueue<State>,
@@ -38,8 +39,8 @@ pub struct Conn {
 
 impl Conn {
     #[instrument(level = "error", skip_all)]
-    pub fn init(screenshot: bool, select: SelectMode) -> Result<Self> {
-        assert!(screenshot || select.sel());
+    pub fn init(screenshot: bool, select_mode: SelectMode) -> Result<Self> {
+        assert!(screenshot || select_mode.sel());
         let con = Connection::connect_to_env()?;
         let display = con.display();
 
@@ -59,8 +60,9 @@ impl Conn {
             _registry,
             state: State {
                 screenshot,
-                select,
+                select_mode,
                 status: Status::Initializing,
+                final_selection: FinalSelection::Nothing,
 
                 formats: BTreeSet::default(),
                 outputs: BTreeMap::new(),
@@ -71,6 +73,7 @@ impl Conn {
 
                 mouse: MouseState::default(),
                 keystate: None,
+                select_state: SelectState::Hovering,
 
                 windows: Vec::new(),
 
@@ -87,10 +90,10 @@ impl Conn {
         }
     }
 
-    pub async fn select(&mut self, windows: Vec<Window>) -> Result<()> {
+    pub async fn select(&mut self, windows: Vec<Window>) -> Result<&FinalSelection> {
         // Can only select if we've been preparing for it
-        assert!(self.state.select.sel());
-        if self.state.select == SelectMode::Window && windows.is_empty() {
+        assert!(self.state.select_mode.sel());
+        if self.state.select_mode == SelectMode::Window && windows.is_empty() {
             bail!("No windows available");
         }
 
@@ -108,8 +111,7 @@ impl Conn {
             self.poll_once().await?;
         }
 
-        error!("TODO -- handle selection");
-        Ok(())
+        Ok(&self.state.final_selection)
     }
 
     fn flush(&self) -> Result<()> {
@@ -257,6 +259,9 @@ impl Dispatch<WlRegistry, State> for Global {
                     state.protos.xdg_output.set(xdg_output).unwrap();
                 } else if interface == WlSeat::interface().name {
                     let _seat = reg.bind::<WlSeat, _, _>(name, 9, qh, Self);
+                } else if interface == WpCursorShapeManagerV1::interface().name {
+                    let shape = reg.bind::<WpCursorShapeManagerV1, _, _>(name, 1, qh, NoopIgnore);
+                    state.protos.shape_manager.set(shape).unwrap();
                 }
             }
             Event::GlobalRemove { name } if state.outputs.remove(&OutputKey(name)).is_some() => {
@@ -291,10 +296,11 @@ impl Dispatch<WlCallback, State> for Global {
         state.protos.output_capture.get().unwrap();
         state.protos.image_copy.get().unwrap();
         state.protos.xdg_output.get().unwrap();
+        state.protos.shape_manager.get().unwrap();
         // state.format.get().unwrap();
 
         state.try_handle(|state| {
-            if state.select == SelectMode::Region && state.screenshot {
+            if state.select_mode == SelectMode::Region && state.screenshot {
                 let buffer = magnifier::draw_crosshair(state, qhandle)?;
                 state.magnifier_crosshairs.set(buffer).unwrap();
             }

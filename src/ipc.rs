@@ -187,7 +187,7 @@ async fn hyprland() -> Result<Vec<Window>> {
                     height: (monitor.height as f32 / monitor.scale).round() as _,
                 };
 
-                // Can this cross multiple monitors?
+                // Can a scrolling workspace cross multiple monitors?
                 c_region.intersect(&m_region).map(|r| (client, r))
             } else {
                 Some((client, c_region))

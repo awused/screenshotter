@@ -13,8 +13,8 @@ use tokio::pin;
 use crate::config::CONFIG;
 use crate::ipc::Window;
 use crate::target::MODE;
-use crate::wayland::SelectMode;
 use crate::wayland::conn::Conn;
+use crate::wayland::{FinalSelection, SelectMode};
 
 #[macro_use]
 extern crate tracing;
@@ -158,12 +158,12 @@ async fn name() -> Result<()> {
 #[instrument(level = "error", skip_all)]
 async fn prop() -> Result<()> {
     trace!("Starting prop");
-    let mut con = Conn::init(false, SelectMode::Region)?;
+    let mut con = Conn::init(false, SelectMode::Window)?;
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
-    let region = selection::region(&windows)?;
-    if let Some(window) = region.best_window(windows) {
-        window.dump();
+    let selection = con.select(windows).await?;
+    if let FinalSelection::Window(w) = selection {
+        w.dump();
     }
 
     Ok(())

@@ -3,7 +3,8 @@ use std::cell::OnceCell;
 use color_eyre::Result;
 use color_eyre::eyre::{bail, eyre};
 use wayland_client::protocol::wl_output::WlOutput;
-use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::protocol::wl_subsurface::WlSubsurface;
+use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{
     self, WpFractionalScaleV1,
@@ -14,13 +15,18 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
 };
 
-use crate::util::MRegion;
+use crate::util::{MRegion, Monitor};
 use crate::wayland::magnifier::Magnifier;
+use crate::wayland::overlay::drawing::{Drawing, DrawingKey};
 use crate::wayland::protos::{Buffer, Protos};
-use crate::wayland::{MouseState, OutputKey, State};
+use crate::wayland::{Format, MouseState, OutputKey, State, Transform};
+
+mod drawing;
 
 #[derive(Debug)]
 pub struct Overlay {
+    pub output: OutputKey,
+
     pub fract_scale: WpFractionalScaleV1,
 
     pub layer_surface: ZwlrLayerSurfaceV1,
@@ -28,12 +34,21 @@ pub struct Overlay {
     pub freeze_surface: WlSurface,
     pub freeze_port: WpViewport,
 
-    // select_surface: WlSubsurface,
+    overlay_surface: WlSurface,
+    pub overlay_port: WpViewport,
+    overlay_subsurface: WlSubsurface,
+
+    transparent_format: Format,
+    // Can be large, only gets initialized if needed
+    drawings: Vec<Drawing>,
+
     pub magnifier: Option<Magnifier>,
 
     pub unscaled: OnceCell<(u32, u32)>,
     // All compositors worth caring about implement fractional scale, so only support that.
     scale: OnceCell<u32>,
+
+    pub transform: Transform,
 }
 
 impl Overlay {
@@ -59,7 +74,7 @@ impl Overlay {
         self.freeze_surface.commit();
     }
 
-    pub fn move_magnifier(&self, mouse: &MouseState, monitor: &MRegion) {
+    pub fn move_magnifier(&self, mouse: &MouseState, monitor: &Monitor) {
         let Some(ref mag) = self.magnifier else {
             return;
         };
@@ -76,6 +91,47 @@ impl Overlay {
 
         mag.show(freeze_buffer, crosshair);
     }
+
+    pub fn draw_box(
+        &mut self,
+        protos: &Protos,
+        qhandle: &QueueHandle<State>,
+        rect: Option<MRegion>,
+    ) -> Result<()> {
+        if rect.is_none() && self.drawings.is_empty() {
+            return Ok(());
+        }
+        let (w, h) = self.initialized_res().unwrap();
+
+
+        let drawing = if let Some(drawing) = self.drawings.iter_mut().find(|d| !d.locked) {
+            drawing
+        } else {
+            let index = self.drawings.len();
+            if index > 3 {
+                bail!("Too many drawings, they're not being unlocked");
+            }
+
+            let buffer = protos.create_buffer(
+                qhandle,
+                self.transparent_format,
+                w,
+                h,
+                DrawingKey(self.output, index),
+            )?;
+            self.drawings.push_mut(Drawing { buffer, drawn: None, locked: false })
+        };
+
+        if drawing.draw(rect) {
+            // Could be smarter here, likely does not matter.
+            self.overlay_surface.attach(Some(&drawing.buffer.wl_buffer), 0, 0);
+            self.overlay_surface.damage(0, 0, w, h);
+            self.overlay_surface.commit();
+            self.freeze_surface.commit();
+        }
+
+        Ok(())
+    }
 }
 
 impl Protos {
@@ -83,20 +139,16 @@ impl Protos {
     pub fn setup_overlay(
         &self,
         qh: &QueueHandle<State>,
-        outkey: OutputKey,
+        output: OutputKey,
         wl_out: &WlOutput,
+        transparent_format: Format,
+        transform: Transform,
         magnifier: bool,
     ) -> Result<Overlay> {
         let compositor = self.compositor();
 
-        let freeze_surface = compositor.create_surface(qh, outkey);
-        // let region = compositor.create_region(qh, NoopIgnore);
-        // Zero out the input region for this surface
-        // freeze_surface.set_input_region(Some(&region));
-        // region.destroy();
-
-
-        let fract_scale = self.fractional().get_fractional_scale(&freeze_surface, qh, outkey);
+        let freeze_surface = compositor.create_surface(qh, output);
+        let fract_scale = self.fractional().get_fractional_scale(&freeze_surface, qh, output);
 
         let freeze_port = self.viewporter().get_viewport(&freeze_surface, qh, NoopIgnore);
 
@@ -107,7 +159,7 @@ impl Protos {
             zwlr_layer_shell_v1::Layer::Overlay,
             "screenshotter-freeze".to_string(),
             qh,
-            outkey,
+            output,
         );
 
         layer_surface.set_size(0, 0);
@@ -116,19 +168,41 @@ impl Protos {
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
 
 
+        let overlay_surface = compositor.create_surface(qh, NoopIgnore);
+        let region = compositor.create_region(qh, NoopIgnore);
+        overlay_surface.set_input_region(Some(&region));
+        region.destroy();
+
+
+        let overlay_port = self.viewporter().get_viewport(&overlay_surface, qh, NoopIgnore);
+        let overlay_subsurface =
+            self.subcompositor()
+                .get_subsurface(&overlay_surface, &freeze_surface, qh, NoopIgnore);
+
         let magnifier =
             if magnifier { Some(self.setup_magnifier(qh, &freeze_surface)?) } else { None };
 
         freeze_surface.commit();
 
         Ok(Overlay {
+            output,
+
             fract_scale,
             layer_surface,
             freeze_surface,
             freeze_port,
+
+            overlay_surface,
+            overlay_port,
+            overlay_subsurface,
+
+            transparent_format,
+            drawings: Vec::new(),
+
             magnifier,
             unscaled: OnceCell::default(),
             scale: OnceCell::default(),
+            transform,
         })
     }
 }
@@ -141,7 +215,7 @@ impl Dispatch<WpFractionalScaleV1, State> for OutputKey {
         _proxy: &WpFractionalScaleV1,
         event: <WpFractionalScaleV1 as wayland_client::Proxy>::Event,
         _conn: &wayland_client::Connection,
-        _qh: &wayland_client::QueueHandle<State>,
+        qh: &wayland_client::QueueHandle<State>,
     ) {
         trace!("FractionalScale: {self:?} {event:?}");
         use wp_fractional_scale_v1::Event;
@@ -151,10 +225,7 @@ impl Dispatch<WpFractionalScaleV1, State> for OutputKey {
         };
 
         state.try_handle(|state| {
-            let output =
-                state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {:?}", self))?;
-
-            output
+            state.outputs[self]
                 .overlay
                 .get()
                 .unwrap()
@@ -162,7 +233,7 @@ impl Dispatch<WpFractionalScaleV1, State> for OutputKey {
                 .set(scale)
                 .map_err(|_| eyre!("Scale reconfigured for {self:?}"))?;
 
-            state.try_freeze(*self)?;
+            state.try_finish_overlay(qh, *self)?;
 
             Ok(())
         });
@@ -182,7 +253,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, State> for OutputKey {
         use zwlr_layer_surface_v1::Event;
 
         state.try_handle(|state| {
-            let output = state.outputs.get(self).ok_or_else(|| eyre!("No output {:?}", self))?;
+            let output = &state.outputs[self];
 
             match event {
                 Event::Configure { serial, width, height } => {
@@ -195,22 +266,53 @@ impl Dispatch<ZwlrLayerSurfaceV1, State> for OutputKey {
                     let _ignored = overlay.unscaled.set((width, height));
 
                     proxy.ack_configure(serial);
+
                     if overlay.scale.get().is_none() {
-                        warn!("Hyprland did not set scale before configure");
                         let dummy = state.protos.create_buffer(
                             qh,
                             state.transparent_format(),
                             1 as _,
                             1 as _,
+                            NoopIgnore,
                         )?;
                         overlay.freeze_surface.attach(Some(&dummy.wl_buffer), 0, 0);
                         overlay.freeze_surface.commit();
                     }
 
-                    state.try_freeze(*self)?;
+                    state.try_finish_overlay(qh, *self)?;
                 }
                 Event::Closed => bail!("Got closed event for layer surface {self:?}"),
                 _ => {}
+            }
+
+            Ok(())
+        });
+    }
+}
+
+impl Dispatch<WlSurface, State> for OutputKey {
+    fn event(
+        &self,
+        state: &mut State,
+        _proxy: &WlSurface,
+        event: <WlSurface as wayland_client::Proxy>::Event,
+        _conn: &wayland_client::Connection,
+        qh: &wayland_client::QueueHandle<State>,
+    ) {
+        use wl_surface::Event;
+
+        let Event::PreferredBufferTransform { transform } = event else {
+            return;
+        };
+
+        let transform = Transform(transform);
+
+        state.try_handle(|state| {
+            let output = &state.outputs[self];
+
+            let overlay = output.overlay.get().unwrap();
+            if overlay.transform != transform {
+                bail!("Transform changed for output {self:?} to {transform:?}");
             }
 
             Ok(())
@@ -226,5 +328,9 @@ impl Drop for Overlay {
 
         self.freeze_surface.destroy();
         self.freeze_port.destroy();
+
+        self.overlay_surface.destroy();
+        self.overlay_port.destroy();
+        self.overlay_subsurface.destroy();
     }
 }

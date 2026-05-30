@@ -1,24 +1,25 @@
 use std::cell::OnceCell;
+use std::mem::swap;
 
+use color_eyre::Result;
 use color_eyre::eyre::{bail, eyre};
 use wayland_client::protocol::wl_output::{self, WlOutput};
-use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Dispatch, NoopIgnore};
+use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::Options;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
 
-use crate::util::{MRegion, Monitor};
+use crate::util::{LRegion, Monitor};
 use crate::wayland::capture::Capture;
 use crate::wayland::overlay::Overlay;
-use crate::wayland::{OutputKey, SelectMode, State};
+use crate::wayland::protos::Protos;
+use crate::wayland::{OutputKey, SelectMode, State, Transform};
 
 
 #[derive(Debug)]
 pub struct Output {
     pub wl_output: WlOutput,
     _xdg_output: ZxdgOutputV1,
-    desc: Monitor,
-    pub physical: MRegion,
+    pub monitor: Monitor,
 
     pub capture: Capture,
     pub overlay: OnceCell<Overlay>,
@@ -31,8 +32,7 @@ impl Output {
         Self {
             wl_output,
             _xdg_output,
-            desc: Monitor::default(),
-            physical: MRegion::default(),
+            monitor: Monitor::default(),
 
             capture: Capture::default(),
             overlay: OnceCell::default(),
@@ -40,6 +40,18 @@ impl Output {
             // One for wl_output, one for xdg_output
             pending_done: 2,
         }
+    }
+
+    pub fn draw_region(
+        &mut self,
+        protos: &Protos,
+        qhandle: &QueueHandle<State>,
+        region: Option<LRegion>,
+    ) -> Result<()> {
+        // TODO[transforms]
+        let region = region.and_then(|r| self.monitor.intersect(&r));
+
+        self.overlay.get_mut().unwrap().draw_box(protos, qhandle, region)
     }
 }
 
@@ -61,15 +73,33 @@ impl Dispatch<WlOutput, State> for OutputKey {
                 let output =
                     state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {self:?}"))?;
 
-                if !output.physical.is_empty() {
+                if !output.monitor.physical.is_empty() {
                     bail!("Got second mode for output {self:?}");
                 }
 
-                output.physical.width = width;
-                output.physical.height = height;
+                if output.monitor.transform.rotate() {
+                    output.monitor.physical.width = height;
+                    output.monitor.physical.height = width;
+                } else {
+                    output.monitor.physical.width = width;
+                    output.monitor.physical.height = height;
+                }
 
                 Ok(())
             });
+            return;
+        }
+
+        if let Event::Geometry { transform, .. } = event {
+            let transform = Transform(transform);
+
+            let output = state.outputs.get_mut(self).unwrap();
+            output.monitor.transform = transform;
+
+            if transform.rotate() {
+                swap(&mut output.monitor.physical.width, &mut output.monitor.physical.height)
+            }
+
             return;
         }
 
@@ -78,6 +108,7 @@ impl Dispatch<WlOutput, State> for OutputKey {
             return;
         }
         state.try_handle(|state| {
+            let format = state.transparent_format();
             let output = state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {self:?}"))?;
             if output.pending_done == 0 {
                 bail!("Got more wl_output::done events than expected. Exiting");
@@ -87,17 +118,17 @@ impl Dispatch<WlOutput, State> for OutputKey {
                 return Ok(());
             }
 
-            if output.desc.region.is_empty() || output.physical.is_empty() {
+            if output.monitor.logical.is_empty() || output.monitor.physical.is_empty() {
                 bail!("Empty region for output {self:?}");
             }
 
             // TODO[transform]
-            let scale = output.physical.width as f64 / output.desc.region.width as f64;
+            let scale = output.monitor.physical.width as f64 / output.monitor.logical.width as f64;
             if !scale.is_normal() || scale <= 0.01 {
                 bail!("Invalid monitor scale {scale} for {self:?}");
             }
             trace!("Calculated monitor scale as {scale}");
-            output.desc.scale = scale;
+            output.monitor.scale = scale;
 
             if state.screenshot {
                 // TODO -- allow cursor?
@@ -107,6 +138,7 @@ impl Dispatch<WlOutput, State> for OutputKey {
                 let session = session.create_session(&source, Options::empty(), qh, *self);
                 source.destroy();
 
+                output.capture.transform = output.monitor.transform;
                 output
                     .capture
                     .session
@@ -114,14 +146,17 @@ impl Dispatch<WlOutput, State> for OutputKey {
                     .map_err(|_| eyre!("Output {:?} reconfigured", self))?;
             }
 
-            if state.select.sel() {
+            if state.select_mode.sel() {
+                let magnifier = state.screenshot && state.select_mode == SelectMode::Region;
                 output
                     .overlay
                     .set(state.protos.setup_overlay(
                         qh,
                         *self,
                         &output.wl_output,
-                        state.screenshot && state.select == SelectMode::Region,
+                        format,
+                        output.monitor.transform,
+                        magnifier,
                     )?)
                     .unwrap();
             }
@@ -146,7 +181,7 @@ impl Dispatch<ZxdgOutputV1, State> for OutputKey {
         state.try_handle(|state| {
             let output =
                 state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {:?}", self))?;
-            let region = &mut output.desc.region;
+            let region = &mut output.monitor.logical;
 
             match event {
                 Event::LogicalPosition { x, y } => {
@@ -161,18 +196,5 @@ impl Dispatch<ZxdgOutputV1, State> for OutputKey {
             }
             Ok(())
         });
-    }
-}
-
-impl Dispatch<WlSurface, State> for OutputKey {
-    fn event(
-        &self,
-        _state: &mut State,
-        _proxy: &WlSurface,
-        event: <WlSurface as wayland_client::Proxy>::Event,
-        _conn: &wayland_client::Connection,
-        _qhandle: &wayland_client::QueueHandle<State>,
-    ) {
-        // TODO -- might need to limit this to specific surfaces
     }
 }

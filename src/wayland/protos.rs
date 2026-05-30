@@ -9,20 +9,20 @@ use color_eyre::eyre::{OptionExt, bail};
 use image::{DynamicImage, RgbImage, RgbaImage};
 use libc::{MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE, close, ftruncate, shm_open, shm_unlink};
 use nix::errno::Errno;
-use wayland_client::NoopIgnore;
+use wayland_client::{Dispatch, NoopIgnore};
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_compositor::WlCompositor;
-use wayland_client::protocol::wl_pointer::WlPointer;
-use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
+use crate::util::MRegion;
 use crate::wayland::{Format, State};
 
 #[derive(Debug)]
@@ -30,9 +30,10 @@ pub struct Buffer {
     pub wl_buffer: WlBuffer,
     pub buf: *mut c_void,
     pub fd: RawFd,
-    format: Format,
-    width: usize,
-    height: usize,
+    pub format: Format,
+    // These are untransformed
+    pub width: usize,
+    pub height: usize,
     // Buffer size in bytes
     pub buf_size: usize,
 }
@@ -83,6 +84,7 @@ pub struct Protos {
     pub output_capture: OnceCell<ExtOutputImageCaptureSourceManagerV1>,
     pub image_copy: OnceCell<ExtImageCopyCaptureManagerV1>,
     pub xdg_output: OnceCell<ZxdgOutputManagerV1>,
+    pub shape_manager: OnceCell<WpCursorShapeManagerV1>,
 }
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -94,6 +96,7 @@ impl Protos {
         format: Format,
         width: i32,
         height: i32,
+        udata: impl Dispatch<WlBuffer, State> + Send + Sync + 'static,
     ) -> Result<Buffer> {
         // If this runs into problems, we'll need rng
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -139,7 +142,7 @@ impl Protos {
             stride,
             format.wl_format(),
             qhandle,
-            NoopIgnore,
+            udata,
         );
         pool.destroy();
 
@@ -174,6 +177,7 @@ proto_get!(shm, WlShm);
 proto_get!(output_capture, ExtOutputImageCaptureSourceManagerV1);
 proto_get!(image_copy, ExtImageCopyCaptureManagerV1);
 proto_get!(xdg_output, ZxdgOutputManagerV1);
+proto_get!(shape_manager, WpCursorShapeManagerV1);
 
 impl Drop for Buffer {
     fn drop(&mut self) {
