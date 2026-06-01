@@ -18,7 +18,7 @@ use crate::util::LRegion;
 
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Window {
     #[cfg(feature = "sway")]
     Sway(swayipc::Node),

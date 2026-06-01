@@ -1,7 +1,9 @@
 use std::cell::OnceCell;
+use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::{bail, eyre};
+use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::{self, WlSurface};
@@ -24,6 +26,9 @@ use crate::wayland::{Format, MouseState, OutputKey, State, Transform};
 mod drawing;
 
 #[derive(Debug)]
+struct OverlayKey(OutputKey);
+
+#[derive(Debug)]
 pub struct Overlay {
     pub output: OutputKey,
 
@@ -38,9 +43,13 @@ pub struct Overlay {
     pub overlay_port: WpViewport,
     overlay_subsurface: WlSubsurface,
 
+    pending_region: Option<MRegion>,
+    overlay_frame: Option<WlCallback>,
+
     transparent_format: Format,
     // Can be large, only gets initialized if needed
     drawings: Vec<Drawing>,
+    last_drawing: (usize, Option<MRegion>),
 
     pub magnifier: Option<Magnifier>,
 
@@ -79,7 +88,7 @@ impl Overlay {
             return;
         };
 
-        if mag.position(mouse.x, mouse.y, *self.unscaled.get().unwrap(), monitor) {
+        if mag.position(mouse.point, *self.unscaled.get().unwrap(), monitor) {
             self.freeze_surface.commit();
         }
     }
@@ -98,37 +107,54 @@ impl Overlay {
         qhandle: &QueueHandle<State>,
         rect: Option<MRegion>,
     ) -> Result<()> {
-        if rect.is_none() && self.drawings.is_empty() {
+        if (rect.is_none() && self.drawings.is_empty()) || self.last_drawing.1 == rect {
             return Ok(());
         }
+
+        self.pending_region = rect;
+
+        if self.overlay_frame.is_some() {
+            return Ok(());
+        }
+
         let (w, h) = self.initialized_res().unwrap();
 
+        let (index, drawing) =
+            if let Some(drawing) = self.drawings.iter_mut().enumerate().find(|(_, d)| !d.locked) {
+                drawing
+            } else {
+                let index = self.drawings.len();
+                if index > 3 {
+                    bail!("Too many drawings, they're not being unlocked");
+                }
+                debug!("Creating drawing {index} for {:?}", self.output);
 
-        let drawing = if let Some(drawing) = self.drawings.iter_mut().find(|d| !d.locked) {
-            drawing
-        } else {
-            let index = self.drawings.len();
-            if index > 3 {
-                bail!("Too many drawings, they're not being unlocked");
-            }
+                let buffer = protos.create_buffer(
+                    qhandle,
+                    self.transparent_format,
+                    w,
+                    h,
+                    DrawingKey(self.output, index),
+                )?;
+                (index, self.drawings.push_mut(Drawing { buffer, drawn: None, locked: false }))
+            };
 
-            let buffer = protos.create_buffer(
-                qhandle,
-                self.transparent_format,
-                w,
-                h,
-                DrawingKey(self.output, index),
-            )?;
-            self.drawings.push_mut(Drawing { buffer, drawn: None, locked: false })
-        };
-
-        if drawing.draw(rect) {
+        // TODO - it'd be faster to keep and reuse a single fully transparent buffer for when
+        // nothing is visible
+        if drawing.draw(rect) || index != self.last_drawing.0 {
             // Could be smarter here, likely does not matter.
             self.overlay_surface.attach(Some(&drawing.buffer.wl_buffer), 0, 0);
             self.overlay_surface.damage(0, 0, w, h);
+            // For sway the viewport resets
+            let unscaled = self.unscaled.get().unwrap();
+            self.overlay_port.set_destination(unscaled.0 as _, unscaled.1 as _);
+
+            self.overlay_frame = Some(self.overlay_surface.frame(qhandle, OverlayKey(self.output)));
+
             self.overlay_surface.commit();
             self.freeze_surface.commit();
         }
+        self.last_drawing = (index, rect);
 
         Ok(())
     }
@@ -196,8 +222,12 @@ impl Protos {
             overlay_port,
             overlay_subsurface,
 
+            overlay_frame: None,
+            pending_region: None,
+
             transparent_format,
             drawings: Vec::new(),
+            last_drawing: Default::default(),
 
             magnifier,
             unscaled: OnceCell::default(),
@@ -316,6 +346,23 @@ impl Dispatch<WlSurface, State> for OutputKey {
             }
 
             Ok(())
+        });
+    }
+}
+
+impl Dispatch<WlCallback, State> for OverlayKey {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlCallback,
+        event: <WlCallback as wayland_client::Proxy>::Event,
+        conn: &wayland_client::Connection,
+        qhandle: &QueueHandle<State>,
+    ) {
+        state.try_handle(|state| {
+            let overlay = state.outputs.get_mut(&self.0).unwrap().overlay.get_mut().unwrap();
+            overlay.overlay_frame = None;
+            overlay.draw_box(&state.protos, qhandle, overlay.pending_region)
         });
     }
 }

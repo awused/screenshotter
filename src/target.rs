@@ -3,21 +3,23 @@ use std::cmp::Reverse;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
+use std::thread;
 
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{OptionExt, eyre};
 use color_eyre::{Result, Section, SectionExt};
 use constcat::concat;
 use regex::{Regex, bytes};
 use strfmt::strfmt_map;
 use sysinfo::{Pid, System};
+use tokio::process::Command;
 use tokio::task::{JoinHandle, spawn_blocking};
 
 use crate::ENV_VARS;
 use crate::config::{CONFIG, Override, Reformatter};
 use crate::ipc::Window;
 use crate::util::LRegion;
+use crate::wayland::Selected;
 
 
 const PREFIX: &str = "SCREENSHOTTER_";
@@ -44,6 +46,7 @@ pub struct ApplicationFinder {
     system: Option<JoinHandle<System>>,
 }
 
+
 impl ApplicationFinder {
     pub fn init() -> Self {
         let system = spawn_blocking(|| {
@@ -67,20 +70,33 @@ impl ApplicationFinder {
         Self { system: Some(system) }
     }
 
+    // Can't meaningfully avoid spinning up another thread here, but if spawn_blocking with a
+    // single threaded executor ensures there are no entirely wasted threads.
+    pub fn application_for_spawned(
+        mut self,
+        selection: Selected,
+    ) -> JoinHandle<Result<Application>> {
+        spawn_blocking(move || self.async_main(selection))
+    }
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn async_main(mut self, selection: Selected) -> Result<Application> {
+        self.application_for(&selection).await
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[instrument(level = "error", skip_all)]
-    pub async fn application_for(
-        &mut self,
-        region: LRegion,
-        window: Option<&Window>,
-    ) -> Result<Application> {
+    pub async fn application_for(mut self, selection: &Selected) -> Result<Application> {
         let mut env = ENV_VARS.lock().unwrap();
-        env.insert(GEOMETRY, region.to_string().into());
+        env.insert(
+            GEOMETRY,
+            selection.l_region().ok_or_eyre("No region selected")?.to_string().into(),
+        );
 
         let mut application = Application::default();
         let mut cli = None;
 
-        if let Some(window) = window {
+        if let Some(window) = selection.window() {
             let pid = window.pid();
             if let Some(wm_name) = window.name() {
                 env.insert(WM_NAME, wm_name.into());
@@ -117,11 +133,11 @@ impl ApplicationFinder {
             env.insert(DIR, dir.into());
         }
 
-        // Delegates could take a long time to run, could parallelize them.
+        // Delegates _could_ take a long time to run, could parallelize them.
         drop(env);
 
         for over in &CONFIG.overrides {
-            if run_override(&mut application, &cli, over)? {
+            if run_override(&mut application, &cli, over).await? {
                 let mut env = ENV_VARS.lock().unwrap();
                 env.insert(NAME, application.relative_dir.clone().into());
 
@@ -190,7 +206,7 @@ fn get_process(system: System, name: String, pid: u32) -> (OsString, Option<OsSt
 }
 
 #[instrument(level = "error", skip(app, cli))]
-fn run_override(
+async fn run_override(
     app: &mut Application,
     cli: &Option<OsString>,
     over: &'static Override,
@@ -236,7 +252,7 @@ fn run_override(
 
             app.relative_dir = convert_application_name(&new_name).into();
         }
-        Some(Reformatter::Delegate(delegate)) => match run_delegate(delegate) {
+        Some(Reformatter::Delegate(delegate)) => match run_delegate(delegate).await {
             Ok(Some(path)) => {
                 debug!("Delegate matched with output: {path:?}");
                 app.relative_dir = path;
@@ -260,14 +276,14 @@ fn run_override(
 }
 
 #[instrument(level = "error", skip_all, err(level = "debug", Debug))]
-fn run_delegate(delegate: &Path) -> Result<Option<PathBuf>> {
+async fn run_delegate(delegate: &Path) -> Result<Option<PathBuf>> {
     let env = ENV_VARS.lock().unwrap();
     trace!("Running delegate with env: {:#?}", env);
 
     let mut cmd = Command::new(delegate);
     cmd.envs(env.iter());
     drop(env);
-    let output = cmd.output()?;
+    let output = cmd.output().await?;
 
     if !output.status.success() {
         let out = String::from_utf8_lossy(&output.stdout).to_string().header("Stdout");

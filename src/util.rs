@@ -7,6 +7,10 @@ use serde::Serialize;
 use crate::ipc::Window;
 use crate::wayland::Transform;
 
+// A region contains the points (x, y) and (x + width - 1, y + height - 1)
+// x + width is the column just past the edge of the window
+
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct SelectPoint {
     logical: LPoint,
@@ -21,13 +25,24 @@ pub struct LPoint {
 }
 
 // A point in monitor-local logical pixels. Meaningless without a monitor's region.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Default, Debug, PartialEq, Clone, Copy)]
 pub struct MLPoint {
     pub x: f64,
     pub y: f64,
 }
 
+// A region in global logical float pixels
+// The underlying representation in wayland is 1/256 fixed point
+#[derive(Debug, Clone, Copy)]
+pub struct LFRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 // A region in global logical pixels
+// TODO -- consider dropping this for LFReion everywhere
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize, Default)]
 pub struct LRegion {
     pub x: i32,
@@ -64,52 +79,138 @@ pub struct ORegion {
 }
 
 impl Monitor {
+    pub fn global_pixel_bounds(&self, point: MLPoint) -> LFRegion {
+        // top left to bottom right of the containing pixel
+        let x = (point.x * self.scale).floor() / self.scale + self.logical.x as f64;
+        let y = (point.y * self.scale).floor() / self.scale + self.logical.y as f64;
+
+        LFRegion {
+            x,
+            y,
+            width: self.scale,
+            height: self.scale,
+        }
+    }
+
     pub fn local_to_global(&self, point: MLPoint) -> LPoint {
         let x = self.logical.x as f64 + point.x;
         let y = self.logical.y as f64 + point.y;
         LPoint { x, y }
     }
 
-    pub fn intersect(&self, other: &LRegion) -> Option<MRegion> {
-        self.logical.intersect(other).and_then(|r| {
-            let x = ((r.x - self.logical.x) as f64 * self.scale).floor() as _;
-            let y = ((r.y - self.logical.y) as f64 * self.scale).floor() as _;
-            let width = (r.width as f64 * self.scale).ceil() as _;
-            let height = (r.height as f64 * self.scale).ceil() as _;
+    pub fn intersect_float(&self, other: &LFRegion) -> Option<MRegion> {
+        other.intersect(&self.logical.into()).and_then(|r| {
+            let left = ((r.x - self.logical.x as f64) * self.scale).floor() as _;
+            let top = ((r.y - self.logical.y as f64) * self.scale).floor() as _;
+            let right = ((r.x - self.logical.x as f64 + r.width) * self.scale).ceil() as i32;
+            let bottom = ((r.y - self.logical.y as f64 + r.height) * self.scale).ceil() as i32;
 
-            if x < 0
-                || x + width > self.physical.width
-                || y < 0
-                || y + height > self.physical.height
-            {
-                error!("Bad intersection {self:?}, {x},{y} {width}x{height}");
+            let width = right - left;
+            let height = bottom - top;
+
+            if left < 0 || right > self.physical.width || top < 0 || bottom > self.physical.height {
+                error!("Bad intersection {self:?}, {left},{top} {width}x{height}");
                 None
             } else {
-                Some(MRegion { x, y, width, height })
+                Some(MRegion { x: left, y: top, width, height })
             }
         })
+    }
+
+    pub fn intersect(&self, other: &LRegion) -> Option<MRegion> {
+        self.logical.intersect(other).and_then(|r| {
+            // TODO -- ensure this can't
+            let left = ((r.x - self.logical.x) as f64 * self.scale).floor() as _;
+            let top = ((r.y - self.logical.y) as f64 * self.scale).floor() as _;
+            let right = ((r.x - self.logical.x + r.width) as f64 * self.scale).ceil() as i32;
+            let bottom = ((r.y - self.logical.y + r.height) as f64 * self.scale).ceil() as i32;
+
+            let width = right - left;
+            let height = bottom - top;
+
+            if left < 0 || right > self.physical.width || top < 0 || bottom > self.physical.height {
+                error!("Bad intersection {self:?}, {left},{top} {width}x{height}");
+                None
+            } else {
+                Some(MRegion { x: left, y: top, width, height })
+            }
+        })
+    }
+}
+
+impl LFRegion {
+    pub fn upper_left(&self) -> LPoint {
+        LPoint { x: self.x, y: self.y }
+    }
+
+    pub fn intersect(self, other: &Self) -> Option<Self> {
+        let left = f64::max(self.x, other.x);
+        let right = f64::min(self.x + self.width, other.x + other.width);
+        let top = f64::max(self.y, other.y);
+        let bottom = f64::min(self.y + self.height, other.y + other.height);
+        if right > left && bottom > top {
+            Some(Self {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            })
+        } else {
+            None
+        }
+    }
+
+    // Given precise points on two monitors, find a logical bounding region that definitely
+    // contains both points.
+    // pub fn bounding_region(
+    //     a: MLPoint,
+    //     b: MLPoint,
+    //     monitor_a: &Monitor,
+    //     monitor_b: &Monitor,
+    // ) -> Self {
+    // monitor_a.local_to_global(a).bounding_region(&monitor_b.local_to_global(b))
+    // }
+
+    pub fn bounding_region(&self, other: &Self) -> Self {
+        let left = f64::min(self.x, other.x);
+        let right = f64::max(self.x + self.width, other.x + other.width);
+        let top = f64::min(self.y, other.y);
+        let bottom = f64::max(self.y + self.height, other.y + other.height);
+        Self {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        }
+    }
+
+    pub fn int_region(&self) -> LRegion {
+        let left = self.x.floor() as i32;
+        let right = (self.x + self.width).ceil() as i32;
+        let top = self.y.floor() as i32;
+        let bottom = (self.y + self.height).ceil() as i32;
+        LRegion {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        }
+    }
+
+    pub fn best_window(&self, windows: &mut Vec<Window>) -> Option<Window> {
+        let x = self.x + self.width / 2.;
+        let y = self.y + self.height / 2.;
+        let point = LPoint { x, y };
+        windows.extract_if(.., |w| w.region().contains(point)).next()
     }
 }
 
 impl LRegion {
     pub const fn contains(&self, point: LPoint) -> bool {
         self.x as f64 <= point.x
-            && (self.x + self.width) as f64 >= point.x
+            && (self.x + self.width) as f64 > point.x
             && self.y as f64 <= point.y
-            && (self.y + self.height) as f64 >= point.y
-    }
-
-    // TODO -- remove the part about exact matches
-    pub fn best_window(&self, mut windows: Vec<Window>) -> Option<Window> {
-        // Priotitize exact matches, even if the center is somewhere else
-        if let Some(exact) = windows.extract_if(.., |w| *self == w.region()).next() {
-            return Some(exact);
-        }
-
-        let x = self.x as f64 + self.width as f64 / 2.;
-        let y = self.y as f64 + self.height as f64 / 2.;
-        let point = LPoint { x, y };
-        windows.into_iter().find(|w| w.region().contains(point))
+            && (self.y + self.height) as f64 > point.y
     }
 
     // Returns a non-empty intersection
@@ -144,35 +245,30 @@ impl LRegion {
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
-
-    // Given precise points on two monitors, find a logical bounding region that definitely
-    // contains both points.
-    pub fn bounding_region(
-        a: MLPoint,
-        b: MLPoint,
-        monitor_a: &Monitor,
-        monitor_b: &Monitor,
-    ) -> Self {
-        let LPoint { x: x1, y: y1 } = monitor_a.local_to_global(a);
-        let LPoint { x: x2, y: y2 } = monitor_b.local_to_global(b);
-
-        let left = f64::min(x1, x2).floor() as i32;
-        let right = f64::max(x1, x2).ceil() as i32;
-        let top = f64::min(y1, y2).floor() as i32;
-        let bottom = f64::max(y1, y2).ceil() as i32;
-
-        Self {
-            x: left,
-            y: top,
-            width: right - left,
-            height: bottom - top,
-        }
-    }
 }
 
 impl MRegion {
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
+    }
+}
+
+impl LPoint {
+    pub fn bounding_region(&self, other: &Self) -> LFRegion {
+        let Self { x: x1, y: y1 } = *self;
+        let Self { x: x2, y: y2 } = *other;
+
+        let left = f64::min(x1, x2);
+        let right = f64::max(x1, x2);
+        let top = f64::min(y1, y2);
+        let bottom = f64::max(y1, y2);
+
+        LFRegion {
+            x: left,
+            y: top,
+            width: right - left + 1.0,
+            height: bottom - top + 1.0,
+        }
     }
 }
 
@@ -198,5 +294,16 @@ impl TryFrom<String> for LRegion {
             width: width.parse()?,
             height: height.parse()?,
         })
+    }
+}
+
+impl From<LRegion> for LFRegion {
+    fn from(r: LRegion) -> Self {
+        Self {
+            x: r.x as f64,
+            y: r.y as f64,
+            width: r.width as f64,
+            height: r.height as f64,
+        }
     }
 }

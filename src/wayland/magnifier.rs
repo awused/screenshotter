@@ -7,15 +7,17 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{NoopIgnore, QueueHandle};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
-use crate::util::{MRegion, Monitor};
+use crate::util::{MLPoint, MRegion, Monitor};
 use crate::wayland::State;
 use crate::wayland::protos::{Buffer, Protos};
 
+// Must be odd
 const RES: usize = 11;
-const SCALE: usize = 15;
+const SCALE: usize = 20;
 const LARGE_RES: usize = RES * SCALE;
 const PADDING: i32 = 30;
 
+// TODO -- properly make this nearest-neighbour
 #[derive(Debug)]
 pub struct Magnifier {
     pub zoom_surface: WlSurface,
@@ -46,7 +48,12 @@ impl Magnifier {
     }
 
     // TODO[transform]
-    pub fn position(&self, x: f64, y: f64, mut bounds: (u32, u32), monitor: &Monitor) -> bool {
+    pub fn position(
+        &self,
+        MLPoint { x, y }: MLPoint,
+        mut bounds: (u32, u32),
+        monitor: &Monitor,
+    ) -> bool {
         let log_x = x.round() as i32;
         let log_y = y.round() as i32;
 
@@ -94,18 +101,18 @@ impl Magnifier {
             right += left;
             left = 0;
         }
-        if right >= monitor.physical.width {
-            left += right - (monitor.physical.width + 1);
-            right = monitor.physical.width - 1;
+        if right > monitor.physical.width {
+            left += right - (monitor.physical.width);
+            right = monitor.physical.width;
         }
 
         if top < 0 {
             bottom += top;
             top = 0;
         }
-        if bottom >= monitor.physical.height {
-            top += bottom - (monitor.physical.height + 1);
-            bottom = monitor.physical.height - 1;
+        if bottom > monitor.physical.height {
+            top += bottom - (monitor.physical.height);
+            bottom = monitor.physical.height;
         }
         // TODO -- adjust the output to compensate or don't bother?
 

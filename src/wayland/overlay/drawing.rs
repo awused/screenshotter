@@ -14,8 +14,8 @@ pub struct DrawingKey(pub OutputKey, pub usize);
 #[derive(Debug)]
 pub struct Drawing {
     pub buffer: Buffer,
+    // Could use a dedicated None buffer for better reuse
     pub drawn: Option<MRegion>,
-    // The only buffer (right now) that is continually mutated
     pub locked: bool,
 }
 
@@ -65,12 +65,22 @@ impl Drawing {
 
         // Fill
         unsafe {
-            for y in region.y as usize..(region.y + region.height) as usize {
-                let start = region.x as usize + y * stride;
-                assert!(start + (region.width as usize) <= max_size);
-                let start = raw.add(start);
+            if region.width as usize == self.buffer.width {
+                let start = region.y as usize * stride;
+                let len = region.height as usize * stride;
+                assert!(start + len <= max_size);
+                let start = raw.add(region.y as usize * stride);
                 assert!(start.is_aligned());
-                slice::from_raw_parts_mut(start, region.width as _).fill(fill)
+
+                slice::from_raw_parts_mut(start, len).fill(fill);
+            } else {
+                for y in region.y as usize..(region.y + region.height) as usize {
+                    let start = region.x as usize + y * stride;
+                    assert!(start + (region.width as usize) <= max_size);
+                    let start = raw.add(start);
+                    assert!(start.is_aligned());
+                    slice::from_raw_parts_mut(start, region.width as _).fill(fill)
+                }
             }
         }
 

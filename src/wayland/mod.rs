@@ -16,8 +16,9 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
 use xkbcommon::xkb::{Context, Keycode, Keymap, Keysym, State as XkbState};
 
+use crate::CLICK_TIME_MS;
 use crate::ipc::Window;
-use crate::util::{LRegion, MLPoint, MRegion};
+use crate::util::{LFRegion, LRegion, MLPoint, MRegion};
 use crate::wayland::output::Output;
 use crate::wayland::protos::{Buffer, Protos};
 
@@ -81,18 +82,17 @@ impl Default for Transform {
 #[derive(Debug, Default)]
 struct MouseState {
     // Local within the given surface
-    x: f64,
-    y: f64,
-    output: Option<OutputKey>,
-    surface: Option<WlSurface>,
+    point: MLPoint,
+    hover: Option<(WlSurface, OutputKey)>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum Status {
     Initializing,
     Waiting,
     Selecting,
-    Done,
+    Done(Selected),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -102,13 +102,30 @@ pub enum SelectMode {
     Window,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum FinalSelection {
+pub enum Selected {
     Nothing,
-    MonitorRegion(MRegion),
-    LogicalRegion(LRegion),
+    Region(LFRegion),
+    RegionWindow(LFRegion, Window),
     Window(Window),
+}
+
+impl Selected {
+    pub const fn window(&self) -> Option<&Window> {
+        match self {
+            Self::Nothing | Self::Region(_) => None,
+            Self::RegionWindow(_, window) | Self::Window(window) => Some(window),
+        }
+    }
+
+    pub fn l_region(&self) -> Option<LRegion> {
+        match self {
+            Self::Nothing => None,
+            Self::Region(lfregion) | Self::RegionWindow(lfregion, _) => Some(lfregion.int_region()),
+            Self::Window(window) => Some(window.region()),
+        }
+    }
 }
 
 impl SelectMode {
@@ -125,9 +142,9 @@ pub enum SelectState {
     Hovering,
     OverWindow(usize),
     Dragging {
-        start: MLPoint,
-        start_out: OutputKey,
-        time: u32,
+        start_pixel: LFRegion,
+        region: LFRegion,
+        start_time: u32,
         // For if this is determined to be a normal click
         initial_window: Option<usize>,
     },
@@ -139,7 +156,6 @@ struct State {
     // Expect to perform selection
     select_mode: SelectMode,
     status: Status,
-    final_selection: FinalSelection,
 
     // For now we only really support capturing the same format as we overlay
     formats: BTreeSet<Format>,
@@ -162,7 +178,7 @@ struct State {
 impl State {
     fn update_status(&mut self) {
         match self.status {
-            Status::Selecting | Status::Initializing | Status::Done => {}
+            Status::Selecting | Status::Initializing | Status::Done(_) => {}
             Status::Waiting => {
                 let pending_shots =
                     self.screenshot && self.outputs.values().any(|o| !o.capture.done);
@@ -173,7 +189,7 @@ impl State {
                     if self.select_mode.sel() {
                         self.status = Status::Selecting
                     } else {
-                        self.status = Status::Done
+                        self.status = Status::Done(Selected::Nothing)
                     }
                 }
             }
@@ -209,7 +225,6 @@ impl State {
 
         let unscaled = *overlay.unscaled.get().unwrap();
         overlay.freeze_port.set_destination(unscaled.0 as _, unscaled.1 as _);
-        overlay.overlay_port.set_destination(unscaled.0 as _, unscaled.1 as _);
         overlay
             .freeze_surface
             .set_buffer_transform(overlay.transform.freeze_transform());
@@ -247,88 +262,50 @@ impl State {
         Ok(true)
     }
 
+    fn pointer_enter(&mut self, surface: WlSurface, point: MLPoint) {
+        if self.mouse.hover.as_ref().is_some_and(|(s, _)| *s == surface) {
+            warn!("Mouse entered surface {surface:?} it was already in");
+        }
+
+        let (key, output) = self
+            .outputs
+            .iter()
+            .find(|(_k, v)| v.overlay.get().unwrap().freeze_surface == surface)
+            .unwrap();
+
+        if let Some(crosshair) = self.magnifier_crosshairs.get() {
+            let freeze_buffer = output.capture.buffer.get().unwrap();
+            output.overlay.get().unwrap().show_magnifier(freeze_buffer, crosshair);
+        }
+
+        self.mouse.hover = Some((surface, *key));
+        self.mouse.point = point;
+    }
+
     fn pointer_leave(&mut self, surface: WlSurface) {
         trace!("WlPointer leave: {surface:?}");
-        if self.mouse.surface.as_ref() != Some(&surface) {
+        let Some((s, out)) = self.mouse.hover.take() else {
+            return;
+        };
+
+        if s != surface {
             warn!("Mouse left surface {surface:?} it wasn't in");
         }
 
-        self.mouse.surface = None;
-        let Some(out) = self.mouse.output.take() else {
-            return;
-        };
         self.outputs[&out].overlay.get().unwrap().hide_magnifier();
-    }
-
-    fn pointer_button(&mut self, time: u32, button: u32, b_state: ButtonState) {
-        if button == BTN_RIGHT!() {
-            if let SelectState::Dragging { .. } = self.select_state {
-                debug!("Right mouse button cancelling drag.");
-                self.select_state = SelectState::Hovering;
-            }
-            return;
-        } else if button != BTN_LEFT!() {
-            return;
-        }
-
-
-        if b_state == ButtonState::Pressed {
-            match (&self.select_state, self.select_mode) {
-                (_, SelectMode::Nothing) | (SelectState::Hovering, SelectMode::Window) => {}
-                (SelectState::Dragging { .. }, _) => {
-                    debug!("Got left button press while dragging. Ignoring.")
-                }
-                (SelectState::OverWindow(i), SelectMode::Window) => {
-                    debug!("Mouse down on window, selecting");
-                    self.status = Status::Done;
-
-                    self.final_selection = FinalSelection::Window(self.windows.swap_remove(*i));
-                }
-                (_, SelectMode::Region) => {
-                    error!("TODO -- start dragging");
-                }
-            }
-        } else if b_state == ButtonState::Released {
-        }
-        // match self.select_state {
-        //     SelectState::Hovering => ,
-        //     SelectState::OverWindow(_) => todo!(),
-        //     SelectState::Dragging { start, start_out, time, initial_window } => todo!(),
-        // }
     }
 
     // Don't handle enter/leave/motion immediately since they can be part of the same event
     fn pointer_frame(&mut self, qh: &QueueHandle<Self>) {
-        if self.status != Status::Selecting {
+        if !matches!(self.status, Status::Selecting) {
             return;
         }
 
-        let Some(ref surface) = self.mouse.surface else { return };
+        let Some((ref surface, outkey)) = self.mouse.hover else { return };
 
-        let output = if let Some(outkey) = self.mouse.output {
-            &self.outputs[&outkey]
-        } else {
-            let (key, output) = self
-                .outputs
-                .iter()
-                .find(|(_k, v)| v.overlay.get().unwrap().freeze_surface == *surface)
-                .unwrap();
-            self.mouse.output = Some(*key);
-
-            if let Some(crosshair) = self.magnifier_crosshairs.get() {
-                let freeze_buffer = output.capture.buffer.get().unwrap();
-                output.overlay.get().unwrap().show_magnifier(freeze_buffer, crosshair);
-            }
-            output
-        };
-
+        let output = &self.outputs[&outkey];
         output.overlay.get().unwrap().move_magnifier(&self.mouse, &output.monitor);
 
-        //if !dragging
-        // if dragging {
-        // } else {
-        // }
-        //
         self.update_overlay(qh);
     }
 
@@ -336,14 +313,35 @@ impl State {
         match self.select_state {
             SelectState::Hovering => self.update_hover(qh, None),
             SelectState::OverWindow(i) => self.update_hover(qh, Some(i)),
-            SelectState::Dragging { start, start_out, time, initial_window } => todo!(),
+            SelectState::Dragging {
+                start_pixel,
+                ref mut region,
+                start_time,
+                initial_window,
+            } => {
+                let Some((_, out)) = self.mouse.hover else {
+                    warn!("Mouse is not on a surface, not updating overlay");
+                    return;
+                };
+
+                let out = &self.outputs[&out];
+                *region =
+                    out.monitor.global_pixel_bounds(self.mouse.point).bounding_region(&start_pixel);
+
+                self.outputs.values_mut().for_each(|out| {
+                    if let Err(e) = out.draw_region(&self.protos, qh, Some(*region)) {
+                        self.error = Some(e);
+                    }
+                });
+            }
         }
     }
 
     fn update_hover(&mut self, qh: &QueueHandle<Self>, old: Option<usize>) {
-        let new = if let Some(out) = self.mouse.output {
+        let new = if let Some((_, out)) = self.mouse.hover {
             let out = &self.outputs[&out];
-            let point = out.monitor.local_to_global(MLPoint { x: self.mouse.x, y: self.mouse.y });
+            let point = out.monitor.global_pixel_bounds(self.mouse.point).upper_left();
+
             self.windows.iter().enumerate().find(|(_i, w)| w.region().contains(point))
         } else {
             None
@@ -354,7 +352,7 @@ impl State {
             (None, None) => return,
             (Some((i, w)), _) => {
                 self.select_state = SelectState::OverWindow(i);
-                Some(w.region())
+                Some(w.region().into())
             }
             (..) => {
                 self.select_state = SelectState::Hovering;
@@ -367,6 +365,83 @@ impl State {
                 self.error = Some(e);
             }
         });
+    }
+
+    fn pointer_button(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        time: u32,
+        button: u32,
+        b_state: ButtonState,
+    ) {
+        if button == BTN_RIGHT!() {
+            if let SelectState::Dragging { .. } = self.select_state {
+                debug!("Right mouse button cancelling drag.");
+                self.select_state = SelectState::Hovering;
+            }
+            return;
+        } else if button != BTN_LEFT!() {
+            return;
+        }
+
+
+        if b_state == ButtonState::Pressed {
+            let initial_window = match (&self.select_state, self.select_mode) {
+                (_, SelectMode::Nothing) | (SelectState::Hovering, SelectMode::Window) => return,
+                (SelectState::Dragging { .. }, _) => {
+                    debug!("Got left button press while dragging. Ignoring.");
+                    return;
+                }
+                (SelectState::OverWindow(i), SelectMode::Window) => {
+                    debug!("Mouse down on window, selecting");
+                    self.status = Status::Done(Selected::Window(self.windows.swap_remove(*i)));
+
+                    // self.final_selection = FinalSelection::Window(self.windows.swap_remove(*i));
+                    return;
+                }
+                (SelectState::Hovering, SelectMode::Region) => {
+                    error!("TODO -- start dragging");
+                    None
+                }
+                (SelectState::OverWindow(i), SelectMode::Region) => Some(*i),
+            };
+
+            let Some((_, out)) = self.mouse.hover else {
+                error!("Mouse down outside of surface. This should never happen.");
+                return;
+            };
+
+            let start_pixel = self.outputs[&out].monitor.global_pixel_bounds(self.mouse.point);
+            self.select_state = SelectState::Dragging {
+                start_pixel,
+                region: start_pixel,
+                start_time: time,
+                initial_window,
+            }
+        } else if b_state == ButtonState::Released
+            && let SelectState::Dragging {
+                start_pixel: start,
+                region,
+                start_time,
+                initial_window,
+            } = self.select_state
+        {
+            if time.wrapping_sub(start_time) <= CLICK_TIME_MS {
+                println!("It was a click");
+                if let Some(i) = initial_window {
+                    self.status = Status::Done(Selected::Window(self.windows.swap_remove(i)));
+                } else {
+                    warn!("Click outside of window, ignoring.");
+                    self.select_state = SelectState::Hovering;
+                    self.update_overlay(qh);
+                }
+            } else {
+                self.status = Status::Done(region.best_window(&mut self.windows).map_or_else(
+                    || Selected::Region(region),
+                    |w| Selected::RegionWindow(region, w),
+                ));
+            }
+        }
     }
 
     fn handle_key(&self, key: u32) -> Result<()> {
@@ -384,165 +459,30 @@ impl State {
             _ => Ok(()),
         }
     }
-}
 
-impl Dispatch<WlPointer, State> for Global {
-    fn event(
-        &self,
-        state: &mut State,
-        proxy: &WlPointer,
-        event: <WlPointer as Proxy>::Event,
-        _conn: &Connection,
-        qhandle: &QueueHandle<State>,
-    ) {
-        // These ones are just too spammy to bother
-        // trace!("WlPointer {event:?}");
-        use wl_pointer::Event;
-
-        match event {
-            Event::Enter { surface, surface_x, surface_y, serial } => {
-                debug!("WlPointer enter: {surface:?} {surface_x} {surface_y}");
-                if state.mouse.surface.as_ref() == Some(&surface) {
-                    warn!("Mouse entered surface {surface:?} it was already in");
-                }
-                state.mouse.output = None;
-                state.mouse.surface = Some(surface);
-                state.mouse.x = surface_x;
-                state.mouse.y = surface_y;
-
-                let shape = state.protos.shape_manager().get_pointer(proxy, qhandle, NoopIgnore);
-                shape.set_shape(serial, Shape::Crosshair);
-                shape.destroy();
-            }
-            Event::Leave { surface, .. } => {
-                state.pointer_leave(surface);
-            }
-            Event::Motion { surface_x, surface_y, .. } => {
-                state.mouse.x = surface_x;
-                state.mouse.y = surface_y;
-            }
-            Event::Frame => state.pointer_frame(qhandle),
-            Event::Button { time, button, state: button_state, .. } => {
-                trace!("WlPointer button: {button:?} {button_state:?}");
-                state.pointer_button(time, button, button_state);
-            }
-            Event::Axis { .. }
-            | Event::AxisSource { .. }
-            | Event::AxisStop { .. }
-            | Event::AxisDiscrete { .. }
-            | Event::AxisValue120 { .. }
-            | Event::AxisRelativeDirection { .. }
-            | _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlKeyboard, State> for Global {
-    fn event(
-        &self,
-        state: &mut State,
-        proxy: &WlKeyboard,
-        event: <WlKeyboard as Proxy>::Event,
-        conn: &Connection,
-        qhandle: &QueueHandle<State>,
-    ) {
-        debug!("WlKeyboard: {event:?}");
-        use wl_keyboard::Event;
-
-        state.try_handle(|state| {
-            match event {
-                Event::Keymap { format, fd, size } => {
-                    let context = Context::new(0);
-
-                    if format == KeymapFormat::XkbV1 {
-                        let keymap = unsafe {
-                            Keymap::new_from_fd(
-                                &context,
-                                fd,
-                                size as _,
-                                XKB_KEYMAP_FORMAT_TEXT_V1,
-                                0,
-                            )?
-                            .ok_or_else(|| eyre!("Could not build keymap"))?
-                        };
-
-                        state.keystate = Some(XkbState::new(&keymap));
-                    } else if format == KeymapFormat::NoKeymap && state.keystate.is_none() {
-                        let keymap = Keymap::new_from_names(&context, "", "", "", "", None, 0)
-                            .ok_or_else(|| eyre!("Could not build keymap"))?;
-
-                        state.keystate = Some(XkbState::new(&keymap));
-                    }
-                }
-                Event::Enter { serial, surface, keys } => {}
-                Event::Leave { serial, surface } => {}
-                Event::Key { serial, time, key, state: key_state } => {
-                    if key_state == KeyState::Pressed {
-                        state.handle_key(key)?;
-                    }
-                }
-                Event::Modifiers {
-                    serial,
-                    mods_depressed,
-                    mods_latched,
-                    mods_locked,
-                    group,
-                } => {}
-                Event::RepeatInfo { rate, delay } => {}
-                _ => {}
-            }
-            Ok(())
-        });
-    }
-}
-
-
-impl Dispatch<WlShm, State> for Global {
-    fn event(
-        &self,
-        state: &mut State,
-        _proxy: &WlShm,
-        event: <WlShm as Proxy>::Event,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<State>,
-    ) {
-        trace!("WlShm: {event:?}");
-        state.try_handle(|state| {
-            if let wl_shm::Event::Format { format } = event
-                && let Ok(format) = format.try_into()
-            {
-                state.formats.insert(format);
-            }
-            Ok(())
-        });
-    }
-}
-
-impl Dispatch<WlSeat, State> for Global {
-    fn event(
-        &self,
-        state: &mut State,
-        proxy: &WlSeat,
-        event: <WlSeat as Proxy>::Event,
-        conn: &Connection,
-        qh: &QueueHandle<State>,
-    ) {
-        trace!("WlSeat: {event:?}");
-
-        let wl_seat::Event::Capabilities { capabilities } = event else {
-            return;
+    #[instrument(level = "error", skip_all)]
+    fn take_screenshot(mut self) -> Result<()> {
+        let Status::Done(selected) = self.status else {
+            unreachable!();
         };
 
+        let region = match selected {
+            Selected::Nothing => todo!("desktop"),
+            Selected::Region(lfregion) | Selected::RegionWindow(lfregion, _) => lfregion,
+            Selected::Window(window) => window.region().into(),
+        };
 
-        if capabilities.contains(Capability::Pointer) {
-            proxy.get_pointer(qh, Self);
-        }
+        let segments: Vec<_> = self
+            .outputs
+            .into_values()
+            .filter_map(|o| o.monitor.intersect_float(&region).map(|r| (o, r)))
+            .collect();
 
-        if capabilities.contains(Capability::Keyboard) {
-            proxy.get_keyboard(qh, Self);
-        }
+        error!("{}", segments.len());
+        Ok(())
     }
 }
+
 
 impl TryFrom<wl_shm::Format> for Format {
     type Error = ();
@@ -557,21 +497,21 @@ impl TryFrom<wl_shm::Format> for Format {
 }
 
 impl Format {
-    const fn size(self) -> usize {
+    pub const fn size(self) -> usize {
         match self {
             Self::Argb8888 => 4,
             Self::Bgr888 => 3,
         }
     }
 
-    const fn transparent(self) -> bool {
+    pub const fn transparent(self) -> bool {
         match self {
             Self::Argb8888 => true,
             Self::Bgr888 => false,
         }
     }
 
-    const fn wl_format(self) -> wl_shm::Format {
+    pub const fn wl_format(self) -> wl_shm::Format {
         match self {
             Self::Argb8888 => wl_shm::Format::Argb8888,
             Self::Bgr888 => wl_shm::Format::Bgr888,

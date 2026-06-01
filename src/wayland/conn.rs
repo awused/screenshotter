@@ -10,25 +10,31 @@ use tokio::time::{Instant, timeout_at};
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard};
 use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
-use wayland_client::protocol::wl_seat::WlSeat;
-use wayland_client::protocol::wl_shm::WlShm;
+use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
+use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
-use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy};
+use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, NoopIgnore, Proxy, QueueHandle};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
+use xkbcommon::xkb::{Context, Keymap, State as XkbState};
 
 use crate::config::CONFIG;
 use crate::ipc::Window;
+use crate::util::MLPoint;
 use crate::wayland::output::Output;
 use crate::wayland::protos::Protos;
-use crate::wayland::{FinalSelection, Global, MouseState, OutputKey, SelectMode, SelectState, State, Status, magnifier};
+use crate::wayland::{Selected, Format, Global, MouseState, OutputKey, SelectMode, SelectState, State, Status, magnifier};
 
 pub struct Conn {
     queue: EventQueue<State>,
@@ -62,7 +68,6 @@ impl Conn {
                 screenshot,
                 select_mode,
                 status: Status::Initializing,
-                final_selection: FinalSelection::Nothing,
 
                 formats: BTreeSet::default(),
                 outputs: BTreeMap::new(),
@@ -90,7 +95,7 @@ impl Conn {
         }
     }
 
-    pub async fn select(&mut self, windows: Vec<Window>) -> Result<&FinalSelection> {
+    pub async fn select(&mut self, windows: Vec<Window>) -> Result<&Selected> {
         // Can only select if we've been preparing for it
         assert!(self.state.select_mode.sel());
         if self.state.select_mode == SelectMode::Window && windows.is_empty() {
@@ -99,7 +104,7 @@ impl Conn {
 
         self.state.windows = windows;
 
-        while self.state.status != Status::Selecting {
+        while !matches!(self.state.status, (Status::Selecting | Status::Done(_))) {
             self.poll_once().await?;
         }
 
@@ -107,11 +112,15 @@ impl Conn {
             bail!("No monitors detected");
         }
 
-        while self.state.status != Status::Done {
+        // I'm convinced there's a borrow checker bug here
+        while !matches!(self.state.status, Status::Done(_)) {
             self.poll_once().await?;
         }
 
-        Ok(&self.state.final_selection)
+        if let Status::Done(sel) = &self.state.status {
+            return Ok(sel);
+        }
+        unreachable!();
     }
 
     fn flush(&self) -> Result<()> {
@@ -174,6 +183,10 @@ impl Conn {
 
         Ok(())
     }
+
+    pub fn take_screenshot(mut self) -> Result<()> {
+        self.state.take_screenshot()
+    }
 }
 
 fn ignore_dispatch(error: &DispatchError) -> bool {
@@ -207,7 +220,7 @@ impl Dispatch<WlRegistry, State> for Global {
         reg: &WlRegistry,
         event: <WlRegistry as wayland_client::Proxy>::Event,
         _conn: &Connection,
-        qh: &wayland_client::QueueHandle<State>,
+        qh: &QueueHandle<State>,
     ) {
         use wl_registry::Event;
         trace!("WlRegistry {event:?}");
@@ -215,7 +228,7 @@ impl Dispatch<WlRegistry, State> for Global {
         match event {
             Event::Global { name, interface, .. } => {
                 if interface == WlOutput::interface().name {
-                    if state.status != Status::Initializing {
+                    if !matches!(state.status, Status::Initializing) {
                         state.error = Some(eyre!("Got new output after initial sync, exiting"));
                         return;
                     }
@@ -279,10 +292,10 @@ impl Dispatch<WlCallback, State> for Global {
         _proxy: &WlCallback,
         _event: <WlCallback as wayland_client::Proxy>::Event,
         _conn: &Connection,
-        qhandle: &wayland_client::QueueHandle<State>,
+        qhandle: &QueueHandle<State>,
     ) {
         debug!("Finished syncing global state");
-        if state.status == Status::Initializing {
+        if matches!(state.status, Status::Initializing) {
             state.status = Status::Waiting;
         }
 
@@ -307,5 +320,157 @@ impl Dispatch<WlCallback, State> for Global {
 
             Ok(())
         });
+    }
+}
+
+impl Dispatch<WlPointer, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        _conn: &Connection,
+        qhandle: &QueueHandle<State>,
+    ) {
+        // These ones are just too spammy to bother
+        // trace!("WlPointer {event:?}");
+        use wl_pointer::Event;
+
+        match event {
+            Event::Enter { surface, surface_x, surface_y, serial } => {
+                debug!("WlPointer enter: {surface:?} {surface_x} {surface_y}");
+                state.pointer_enter(surface, MLPoint { x: surface_x, y: surface_y });
+
+                let shape = state.protos.shape_manager().get_pointer(proxy, qhandle, NoopIgnore);
+                shape.set_shape(serial, Shape::Crosshair);
+                shape.destroy();
+            }
+            Event::Leave { surface, .. } => {
+                state.pointer_leave(surface);
+            }
+            Event::Motion { surface_x, surface_y, .. } => {
+                state.mouse.point.x = surface_x;
+                state.mouse.point.y = surface_y;
+            }
+            Event::Frame => state.pointer_frame(qhandle),
+            Event::Button { time, button, state: button_state, .. } => {
+                trace!("WlPointer button: {button:?} {button_state:?}");
+                state.pointer_button(qhandle, time, button, button_state);
+            }
+            Event::Axis { .. }
+            | Event::AxisSource { .. }
+            | Event::AxisStop { .. }
+            | Event::AxisDiscrete { .. }
+            | Event::AxisValue120 { .. }
+            | Event::AxisRelativeDirection { .. }
+            | _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlKeyboard,
+        event: <WlKeyboard as Proxy>::Event,
+        conn: &Connection,
+        qhandle: &QueueHandle<State>,
+    ) {
+        debug!("WlKeyboard: {event:?}");
+        use wl_keyboard::Event;
+
+        state.try_handle(|state| {
+            match event {
+                Event::Keymap { format, fd, size } => {
+                    let context = Context::new(0);
+
+                    if format == KeymapFormat::XkbV1 {
+                        let keymap = unsafe {
+                            Keymap::new_from_fd(
+                                &context,
+                                fd,
+                                size as _,
+                                XKB_KEYMAP_FORMAT_TEXT_V1,
+                                0,
+                            )?
+                            .ok_or_else(|| eyre!("Could not build keymap"))?
+                        };
+
+                        state.keystate = Some(XkbState::new(&keymap));
+                    } else if format == KeymapFormat::NoKeymap && state.keystate.is_none() {
+                        let keymap = Keymap::new_from_names(&context, "", "", "", "", None, 0)
+                            .ok_or_else(|| eyre!("Could not build keymap"))?;
+
+                        state.keystate = Some(XkbState::new(&keymap));
+                    }
+                }
+                Event::Enter { serial, surface, keys } => {}
+                Event::Leave { serial, surface } => {}
+                Event::Key { serial, time, key, state: key_state } => {
+                    if key_state == KeyState::Pressed {
+                        state.handle_key(key)?;
+                    }
+                }
+                Event::Modifiers {
+                    serial,
+                    mods_depressed,
+                    mods_latched,
+                    mods_locked,
+                    group,
+                } => {}
+                Event::RepeatInfo { rate, delay } => {}
+                _ => {}
+            }
+            Ok(())
+        });
+    }
+}
+
+
+impl Dispatch<WlShm, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        _proxy: &WlShm,
+        event: <WlShm as Proxy>::Event,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<State>,
+    ) {
+        trace!("WlShm: {event:?}");
+        state.try_handle(|state| {
+            if let wl_shm::Event::Format { format } = event
+                && let Ok(format) = format.try_into()
+            {
+                state.formats.insert(format);
+            }
+            Ok(())
+        });
+    }
+}
+
+impl Dispatch<WlSeat, State> for Global {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlSeat,
+        event: <WlSeat as Proxy>::Event,
+        conn: &Connection,
+        qh: &QueueHandle<State>,
+    ) {
+        trace!("WlSeat: {event:?}");
+
+        let wl_seat::Event::Capabilities { capabilities } = event else {
+            return;
+        };
+
+
+        if capabilities.contains(Capability::Pointer) {
+            proxy.get_pointer(qh, Self);
+        }
+
+        if capabilities.contains(Capability::Keyboard) {
+            proxy.get_keyboard(qh, Self);
+        }
     }
 }

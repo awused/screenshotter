@@ -8,7 +8,7 @@ use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::Options;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
 
-use crate::util::{LRegion, Monitor};
+use crate::util::{LFRegion, LRegion, Monitor};
 use crate::wayland::capture::Capture;
 use crate::wayland::overlay::Overlay;
 use crate::wayland::protos::Protos;
@@ -46,10 +46,10 @@ impl Output {
         &mut self,
         protos: &Protos,
         qhandle: &QueueHandle<State>,
-        region: Option<LRegion>,
+        region: Option<LFRegion>,
     ) -> Result<()> {
         // TODO[transforms]
-        let region = region.and_then(|r| self.monitor.intersect(&r));
+        let region = region.and_then(|r| self.monitor.intersect_float(&r));
 
         self.overlay.get_mut().unwrap().draw_box(protos, qhandle, region)
     }

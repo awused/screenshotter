@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
+use std::thread;
 
 use clap::Parser;
 use color_eyre::Result;
@@ -16,8 +17,9 @@ use tokio::pin;
 use crate::config::CONFIG;
 use crate::ipc::Window;
 use crate::target::MODE;
+use crate::util::LFRegion;
 use crate::wayland::conn::Conn;
-use crate::wayland::{FinalSelection, SelectMode};
+use crate::wayland::{SelectMode, Selected};
 
 #[macro_use]
 extern crate tracing;
@@ -26,10 +28,11 @@ mod config;
 mod elapsedlogger;
 mod img;
 mod ipc;
-mod selection;
 mod target;
 mod util;
 mod wayland;
+
+const CLICK_TIME_MS: u32 = 100;
 
 #[derive(Debug, Parser)]
 enum Command {
@@ -123,9 +126,15 @@ async fn region() -> Result<()> {
     LazyLock::force(&CONFIG);
 
     let mut con = Conn::init(true, SelectMode::Region)?;
+    let mut finder = target::ApplicationFinder::init();
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
     let selection = con.select(windows).await?;
+    let app = finder.application_for_spawned(selection.clone());
+
+    con.take_screenshot();
+
+    println!("{:?}", app.await);
 
     Ok(())
 }
@@ -141,12 +150,13 @@ async fn name() -> Result<()> {
 
 
     let selection = con.select(windows).await?;
-    let FinalSelection::Window(window) = selection else {
+    let Selected::Window(window) = selection else {
         bail!("No window selected");
     };
 
     debug!("Found window {window:?}");
-    let app = finder.application_for(window.region(), Some(window)).await?;
+    let app = finder.application_for(selection).await?;
+
     let target = app.relative_dir.to_string_lossy();
 
     Notification::new()
@@ -168,7 +178,7 @@ async fn prop() -> Result<()> {
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
     let selection = con.select(windows).await?;
-    if let FinalSelection::Window(w) = selection {
+    if let Selected::Window(w) = selection {
         w.dump();
     }
 
