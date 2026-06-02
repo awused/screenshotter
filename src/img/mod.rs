@@ -1,5 +1,16 @@
 // TODO -- maybe skip this?
 
+use image::RgbImage;
+
+use crate::util::{LFRegion, MRegion};
+
+#[derive(Debug)]
+pub struct Screenshot {
+    pub image: RgbImage,
+    pub logical: LFRegion,
+    pub scale: f64,
+}
+
 pub enum ImageData {
     // We can leave data as bgra until the last moment
     Bgra(Vec<u8>),

@@ -102,12 +102,23 @@ impl Monitor {
         LPoint { x, y }
     }
 
-    pub fn intersect_float(&self, other: &LFRegion) -> Option<MRegion> {
+    // Exists solely to handle drag events
+    pub fn global_to_local(&self, point: LPoint) -> MLPoint {
+        let x = point.x - self.logical.x as f64;
+        let y = point.y - self.logical.y as f64;
+        MLPoint { x, y }
+    }
+
+    // LFRegions are pixel-perfect if everything is at the same scale, so reduce tiny variations
+    // with rounding instead of potentially amplifying them.
+    //
+    // If everything is not at the same scale, everything is best-effort.
+    pub fn intersect_rounded(&self, other: &LFRegion) -> Option<(LFRegion, MRegion)> {
         other.intersect(&self.logical.into()).and_then(|r| {
-            let left = ((r.x - self.logical.x as f64) * self.scale).floor() as _;
-            let top = ((r.y - self.logical.y as f64) * self.scale).floor() as _;
-            let right = ((r.x - self.logical.x as f64 + r.width) * self.scale).ceil() as i32;
-            let bottom = ((r.y - self.logical.y as f64 + r.height) * self.scale).ceil() as i32;
+            let left = ((r.x - self.logical.x as f64) * self.scale).round() as _;
+            let top = ((r.y - self.logical.y as f64) * self.scale).round() as _;
+            let right = ((r.x - self.logical.x as f64 + r.width) * self.scale).round() as i32;
+            let bottom = ((r.y - self.logical.y as f64 + r.height) * self.scale).round() as i32;
 
             let width = right - left;
             let height = bottom - top;
@@ -116,7 +127,7 @@ impl Monitor {
                 error!("Bad intersection {self:?}, {left},{top} {width}x{height}");
                 None
             } else {
-                Some(MRegion { x: left, y: top, width, height })
+                Some((r, MRegion { x: left, y: top, width, height }))
             }
         })
     }
@@ -217,6 +228,13 @@ impl LRegion {
             && (self.y + self.height) as f64 > point.y
     }
 
+    pub const fn valid_mouse(&self, point: MLPoint) -> bool {
+        point.x >= 0.0
+            && point.x < self.width as f64
+            && point.y >= 0.0
+            && point.y <= self.height as f64
+    }
+
     // Returns a non-empty intersection
     pub fn intersect(self, other: &Self) -> Option<Self> {
         let left = max(self.x, other.x);
@@ -254,6 +272,11 @@ impl LRegion {
 impl MRegion {
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
+    }
+
+    pub fn contains(&self, MLPoint { x, y }: MLPoint) -> bool {
+        println!("{self:?}, {x},{y}");
+        self.x as f64 <= x && self.width as f64 > x && self.y as f64 <= y && self.height as f64 > y
     }
 }
 

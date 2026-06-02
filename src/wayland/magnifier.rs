@@ -121,6 +121,8 @@ impl Magnifier {
             // draw
         }
 
+        // println!("{:?} {point:?} {origin:?}", self.monitor);
+
 
         if self.last_view.is_none() {
             self.crosshair_surface.attach(Some(&self.cross.wl_buffer), 0, 0);

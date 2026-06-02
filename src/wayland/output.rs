@@ -48,7 +48,7 @@ impl Output {
         region: Option<LFRegion>,
     ) -> Result<()> {
         // TODO[transforms]
-        let region = region.and_then(|r| self.monitor.intersect_float(&r));
+        let region = region.and_then(|r| self.monitor.intersect_rounded(&r)).map(|(l, m)| m);
 
         self.overlay.get_mut().unwrap().draw_box(qhandle, region)
     }

@@ -31,6 +31,7 @@ use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
 use xkbcommon::xkb::{Context, Keymap, State as XkbState};
 
 use crate::config::CONFIG;
+use crate::img::Screenshot;
 use crate::ipc::Window;
 use crate::util::MLPoint;
 use crate::wayland::output::Output;
@@ -185,7 +186,7 @@ impl Conn {
         Ok(())
     }
 
-    pub fn take_screenshot(mut self) -> Result<()> {
+    pub fn take_screenshot(mut self) -> Result<Vec<Screenshot>> {
         self.state.take_screenshot()
     }
 }

@@ -1,9 +1,11 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 use color_eyre::eyre::{bail, eyre};
 use color_eyre::{Report, Result};
+use futures::future::err;
 use input_event_codes::{BTN_LEFT, BTN_RIGHT};
 use libc::input_event;
 use wayland_client::protocol::wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard};
@@ -18,6 +20,7 @@ use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
 use xkbcommon::xkb::{Context, Keycode, Keymap, Keysym, State as XkbState};
 
 use crate::CLICK_TIME_MS;
+use crate::img::Screenshot;
 use crate::ipc::Window;
 use crate::util::{LFRegion, LRegion, MLPoint, MRegion};
 use crate::wayland::magnifier::Magnifier;
@@ -81,11 +84,19 @@ impl Default for Transform {
     }
 }
 
+#[derive(Debug)]
+struct Hover {
+    entered: WlSurface,
+    outkey: OutputKey,
+    // During a drag we get mouse events relative to the starting monitor.
+    corrected: OutputKey,
+}
+
 #[derive(Debug, Default)]
 struct MouseState {
     // Local within the given surface
     point: MLPoint,
-    hover: Option<(WlSurface, OutputKey)>,
+    hover: Option<Hover>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,7 +309,7 @@ impl State {
     }
 
     fn pointer_enter(&mut self, surface: WlSurface, point: MLPoint) {
-        if self.mouse.hover.as_ref().is_some_and(|(s, _)| *s == surface) {
+        if self.mouse.hover.as_ref().is_some_and(|Hover { entered: s, .. }| *s == surface) {
             warn!("Mouse entered surface {surface:?} it was already in");
         }
 
@@ -308,13 +319,17 @@ impl State {
             .find(|(_k, v)| v.overlay.get().unwrap().freeze_surface == surface)
             .unwrap();
 
-        self.mouse.hover = Some((surface, *key));
+        self.mouse.hover = Some(Hover {
+            entered: surface,
+            outkey: *key,
+            corrected: *key,
+        });
         self.mouse.point = point;
     }
 
     fn pointer_leave(&mut self, surface: WlSurface) {
         trace!("WlPointer leave: {surface:?}");
-        let Some((s, out)) = self.mouse.hover.take() else {
+        let Some(Hover { entered: s, corrected, .. }) = self.mouse.hover.take() else {
             return;
         };
 
@@ -322,7 +337,13 @@ impl State {
             warn!("Mouse left surface {surface:?} it wasn't in");
         }
 
-        self.outputs.get_mut(&out).unwrap().overlay.get_mut().unwrap().hide_magnifier();
+        self.outputs
+            .get_mut(&corrected)
+            .unwrap()
+            .overlay
+            .get_mut()
+            .unwrap()
+            .hide_magnifier();
     }
 
     // Don't handle enter/leave/motion immediately since they can be part of the same event
@@ -331,16 +352,53 @@ impl State {
             return;
         }
 
-        let Some((ref surface, outkey)) = self.mouse.hover else { return };
+        let Some(Hover {
+            outkey: mut target, ref mut corrected, ..
+        }) = self.mouse.hover
+        else {
+            return;
+        };
+
+        // Relative to outkey
+        let mut point = self.mouse.point;
+        let output = self.outputs.get_mut(&target).unwrap();
+
+        if !output.monitor.logical.valid_mouse(point) {
+            let global = output.monitor.local_to_global(point);
+
+            // Just iterating is plenty fast
+            let Some((k, o)) =
+                self.outputs.iter().find(|(k, v)| v.monitor.logical.contains(global))
+            else {
+                warn!("Got bad mouse event and could not tie it to a monitor");
+                return;
+            };
+            target = *k;
+            point = o.monitor.global_to_local(global);
+        }
+
+        if *corrected != target {
+            warn!("Corrected current monitor from {corrected:?} {target:?}");
+            self.outputs
+                .get_mut(corrected)
+                .unwrap()
+                .overlay
+                .get_mut()
+                .unwrap()
+                .hide_magnifier();
+            *corrected = target;
+        }
+
+        // Repair broken events during dragging
 
         if let Err(e) = self
             .outputs
-            .get_mut(&outkey)
+            .get_mut(corrected)
             .unwrap()
             .overlay
             .get_mut()
             .unwrap()
-            .move_magnifier(qh, self.mouse.point)
+            .move_magnifier(qh, point)
         {
             self.error = Some(e);
         }
@@ -358,14 +416,20 @@ impl State {
                 start_time,
                 initial_window,
             } => {
-                let Some((_, out)) = self.mouse.hover else {
+                let Some(Hover { outkey, corrected, .. }) = self.mouse.hover else {
                     warn!("Mouse is not on a surface, not updating overlay");
                     return;
                 };
 
-                let out = &self.outputs[&out];
-                *region =
-                    out.monitor.global_pixel_bounds(self.mouse.point).bounding_region(&start_pixel);
+                let end_pixel = if corrected == outkey {
+                    self.outputs[&outkey].monitor.global_pixel_bounds(self.mouse.point)
+                } else {
+                    let point = self.outputs[&outkey].monitor.local_to_global(self.mouse.point);
+                    let corrected = &self.outputs[&corrected];
+                    let point = corrected.monitor.global_to_local(point);
+                    corrected.monitor.global_pixel_bounds(point)
+                };
+                *region = end_pixel.bounding_region(&start_pixel);
 
                 self.outputs.values_mut().for_each(|out| {
                     if let Err(e) = out.draw_region(qh, Some(*region)) {
@@ -377,9 +441,9 @@ impl State {
     }
 
     fn update_hover(&mut self, qh: &QueueHandle<Self>, old: Option<usize>) {
-        let new = if let Some((_, out)) = self.mouse.hover {
-            let out = &self.outputs[&out];
-            let point = out.monitor.global_pixel_bounds(self.mouse.point).upper_left();
+        let new = if let Some(Hover { outkey, .. }) = self.mouse.hover {
+            let out = &self.outputs[&outkey];
+            let point = out.monitor.local_to_global(self.mouse.point);
 
             self.windows.iter().enumerate().find(|(_i, w)| w.region().contains(point))
         } else {
@@ -443,12 +507,16 @@ impl State {
             };
 
 
-            let Some((_, out)) = self.mouse.hover else {
+            let Some(Hover { outkey, corrected, .. }) = self.mouse.hover else {
                 error!("Mouse down outside of surface. This should never happen.");
                 return;
             };
+            if outkey != corrected {
+                error!("Got mousedown while correcting output, this is weird.");
+                return;
+            }
 
-            let start_pixel = self.outputs[&out].monitor.global_pixel_bounds(self.mouse.point);
+            let start_pixel = self.outputs[&outkey].monitor.global_pixel_bounds(self.mouse.point);
             debug!("Drag started at {start_pixel:?}");
 
             self.select_state = SelectState::Dragging {
@@ -499,7 +567,7 @@ impl State {
     }
 
     #[instrument(level = "error", skip_all)]
-    fn take_screenshot(mut self) -> Result<()> {
+    fn take_screenshot(mut self) -> Result<Vec<Screenshot>> {
         let Status::Done(selected) = self.status else {
             unreachable!();
         };
@@ -513,20 +581,22 @@ impl State {
         let segments: Vec<_> = self
             .outputs
             .into_values()
-            .filter_map(|o| o.monitor.intersect_float(&region).map(|r| (o, r)))
+            .filter_map(|o| o.monitor.intersect_rounded(&region).map(|(l, r)| (o, l, r)))
+            .map(|(o, logical, r)| {
+                // let image = o.take_screenshot(r);
+                // Screenshot { image, logical, scale: o.monitor.scale }
+                todo!()
+            })
             .collect();
 
-        error!("{}", segments.len());
-        Ok(())
-    }
-
-    fn init_magnifiers(&mut self) -> Result<()> {
-        if self.mode.magnifier() {
-            return Ok(());
+        if segments.is_empty() {
+            bail!("Nothing to screenshot, this shouldn't happen.");
         }
 
+        info!("Found regions to screenshot on {} monitors", segments.len());
 
-        todo!()
+        error!("{}", segments.len());
+        Ok(segments)
     }
 }
 

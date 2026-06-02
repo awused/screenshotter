@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
+use std::mem::swap;
 use std::rc::Rc;
 
 use color_eyre::eyre::{bail, eyre};
@@ -63,7 +64,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, State> for OutputKey {
             }
 
             match event {
-                Event::BufferSize { width, height } => {
+                Event::BufferSize { mut width, mut height } => {
                     capture
                         .res
                         .set((width.try_into()?, height.try_into()?))

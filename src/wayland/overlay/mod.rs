@@ -283,10 +283,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, State> for OutputKey {
             match event {
                 Event::Configure { serial, width, height } => {
                     let overlay = output.overlay.get().unwrap();
-                    if let Some((w, h)) = overlay.unscaled.get()
-                        && (w, h) != (&width, &height)
-                    {
-                        bail!("Got second configure for {self:?}")
+                    if let Some((w, h)) = overlay.unscaled.get() {
+                        if ((w, h) != (&width, &height)) {
+                            bail!("Got second configure for {self:?}")
+                        }
+                        return Ok(());
                     }
                     let _ignored = overlay.unscaled.set((width, height));
 
