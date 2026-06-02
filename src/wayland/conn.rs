@@ -1,6 +1,7 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
+use std::rc::Rc;
 use std::time::Duration;
 
 use color_eyre::Result;
@@ -34,7 +35,7 @@ use crate::ipc::Window;
 use crate::util::MLPoint;
 use crate::wayland::output::Output;
 use crate::wayland::protos::Protos;
-use crate::wayland::{Selected, Format, Global, MouseState, OutputKey, SelectMode, SelectState, State, Status, magnifier};
+use crate::wayland::{Selected, Format, Global, MouseState, OutputKey, Mode, SelectState, State, Status, magnifier};
 
 pub struct Conn {
     queue: EventQueue<State>,
@@ -45,8 +46,7 @@ pub struct Conn {
 
 impl Conn {
     #[instrument(level = "error", skip_all)]
-    pub fn init(screenshot: bool, select_mode: SelectMode) -> Result<Self> {
-        assert!(screenshot || select_mode.sel());
+    pub fn init(mode: Mode) -> Result<Self> {
         let con = Connection::connect_to_env()?;
         let display = con.display();
 
@@ -65,8 +65,7 @@ impl Conn {
             queue,
             _registry,
             state: State {
-                screenshot,
-                select_mode,
+                mode,
                 status: Status::Initializing,
 
                 formats: BTreeSet::default(),
@@ -74,7 +73,7 @@ impl Conn {
 
                 magnifier_crosshairs: OnceCell::default(),
 
-                protos: Protos::default(),
+                protos: Rc::default(),
 
                 mouse: MouseState::default(),
                 keystate: None,
@@ -97,11 +96,12 @@ impl Conn {
 
     pub async fn select(&mut self, windows: Vec<Window>) -> Result<&Selected> {
         // Can only select if we've been preparing for it
-        assert!(self.state.select_mode.sel());
-        if self.state.select_mode == SelectMode::Window && windows.is_empty() {
+        assert!(self.state.mode.sel());
+        if self.state.mode == Mode::PickWindow && windows.is_empty() {
             bail!("No windows available");
         }
 
+        info!("Starting selection {:?} with {} windows", self.state.mode, windows.len());
         self.state.windows = windows;
 
         while !matches!(self.state.status, (Status::Selecting | Status::Done(_))) {
@@ -118,6 +118,7 @@ impl Conn {
         }
 
         if let Status::Done(sel) = &self.state.status {
+            info!("Selected region {:?}", sel.region());
             return Ok(sel);
         }
         unreachable!();
@@ -313,9 +314,9 @@ impl Dispatch<WlCallback, State> for Global {
         // state.format.get().unwrap();
 
         state.try_handle(|state| {
-            if state.select_mode == SelectMode::Region && state.screenshot {
+            if state.mode == Mode::Region {
                 let buffer = magnifier::draw_crosshair(state, qhandle)?;
-                state.magnifier_crosshairs.set(buffer).unwrap();
+                state.magnifier_crosshairs.set(buffer.into()).unwrap();
             }
 
             Ok(())
@@ -377,7 +378,7 @@ impl Dispatch<WlKeyboard, State> for Global {
         conn: &Connection,
         qhandle: &QueueHandle<State>,
     ) {
-        debug!("WlKeyboard: {event:?}");
+        // debug!("WlKeyboard: {event:?}");
         use wl_keyboard::Event;
 
         state.try_handle(|state| {

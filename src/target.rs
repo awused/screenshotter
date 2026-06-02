@@ -90,7 +90,7 @@ impl ApplicationFinder {
         let mut env = ENV_VARS.lock().unwrap();
         env.insert(
             GEOMETRY,
-            selection.l_region().ok_or_eyre("No region selected")?.to_string().into(),
+            selection.int_region().ok_or_eyre("No region selected")?.to_string().into(),
         );
 
         let mut application = Application::default();

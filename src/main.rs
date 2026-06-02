@@ -19,7 +19,7 @@ use crate::ipc::Window;
 use crate::target::MODE;
 use crate::util::LFRegion;
 use crate::wayland::conn::Conn;
-use crate::wayland::{SelectMode, Selected};
+use crate::wayland::{Mode, Selected};
 
 #[macro_use]
 extern crate tracing;
@@ -101,7 +101,7 @@ async fn window() -> Result<()> {
     trace!("Starting window");
     LazyLock::force(&CONFIG);
 
-    let mut con = Conn::init(true, SelectMode::Nothing)?;
+    let mut con = Conn::init(Mode::ScreenshotOnly)?;
 
 
     con.poll().await?;
@@ -113,7 +113,7 @@ async fn desktop() -> Result<()> {
     trace!("Starting desktop");
     LazyLock::force(&CONFIG);
 
-    let mut con = Conn::init(true, SelectMode::Nothing)?;
+    let mut con = Conn::init(Mode::ScreenshotOnly)?;
 
 
     con.poll().await?;
@@ -125,11 +125,12 @@ async fn region() -> Result<()> {
     trace!("Starting region");
     LazyLock::force(&CONFIG);
 
-    let mut con = Conn::init(true, SelectMode::Region)?;
+    let mut con = Conn::init(Mode::Region)?;
     let mut finder = target::ApplicationFinder::init();
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
     let selection = con.select(windows).await?;
+    debug!("Selected region {:?}", selection.int_region());
     let app = finder.application_for_spawned(selection.clone());
 
     con.take_screenshot();
@@ -145,7 +146,7 @@ async fn name() -> Result<()> {
     trace!("Starting name");
     LazyLock::force(&CONFIG);
     let mut finder = target::ApplicationFinder::init();
-    let mut con = Conn::init(false, SelectMode::Window)?;
+    let mut con = Conn::init(Mode::PickWindow)?;
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
 
@@ -174,7 +175,7 @@ async fn name() -> Result<()> {
 #[instrument(level = "error", skip_all)]
 async fn prop() -> Result<()> {
     trace!("Starting prop");
-    let mut con = Conn::init(false, SelectMode::Window)?;
+    let mut con = Conn::init(Mode::PickWindow)?;
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
     let selection = con.select(windows).await?;

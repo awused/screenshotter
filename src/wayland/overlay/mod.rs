@@ -1,4 +1,5 @@
 use std::cell::OnceCell;
+use std::rc::Rc;
 use std::time::Instant;
 
 use color_eyre::Result;
@@ -17,7 +18,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
 };
 
-use crate::util::{MRegion, Monitor};
+use crate::util::{MLPoint, MRegion, Monitor};
 use crate::wayland::magnifier::Magnifier;
 use crate::wayland::overlay::drawing::{Drawing, DrawingKey};
 use crate::wayland::protos::{Buffer, Protos};
@@ -31,6 +32,7 @@ struct OverlayKey(OutputKey);
 #[derive(Debug)]
 pub struct Overlay {
     pub output: OutputKey,
+    protos: Rc<Protos>,
 
     pub fract_scale: WpFractionalScaleV1,
 
@@ -51,7 +53,7 @@ pub struct Overlay {
     drawings: Vec<Drawing>,
     last_drawing: (usize, Option<MRegion>),
 
-    pub magnifier: Option<Magnifier>,
+    pub magnifier: OnceCell<Magnifier>,
 
     pub unscaled: OnceCell<(u32, u32)>,
     // All compositors worth caring about implement fractional scale, so only support that.
@@ -74,8 +76,8 @@ impl Overlay {
         Some((w as i32, h as i32))
     }
 
-    pub fn hide_magnifier(&self) {
-        let Some(ref mag) = self.magnifier else {
+    pub fn hide_magnifier(&mut self) {
+        let Some(mag) = self.magnifier.get_mut() else {
             return;
         };
 
@@ -83,30 +85,18 @@ impl Overlay {
         self.freeze_surface.commit();
     }
 
-    pub fn move_magnifier(&self, mouse: &MouseState, monitor: &Monitor) {
-        let Some(ref mag) = self.magnifier else {
-            return;
+    pub fn move_magnifier(&mut self, qh: &QueueHandle<State>, point: MLPoint) -> Result<()> {
+        let Some(mag) = self.magnifier.get_mut() else {
+            return Ok(());
         };
 
-        if mag.position(mouse.point, *self.unscaled.get().unwrap(), monitor) {
+        if mag.draw(qh, point)? {
             self.freeze_surface.commit();
         }
+        Ok(())
     }
 
-    pub fn show_magnifier(&self, freeze_buffer: &Buffer, crosshair: &Buffer) {
-        let Some(ref mag) = self.magnifier else {
-            return;
-        };
-
-        mag.show(freeze_buffer, crosshair);
-    }
-
-    pub fn draw_box(
-        &mut self,
-        protos: &Protos,
-        qhandle: &QueueHandle<State>,
-        rect: Option<MRegion>,
-    ) -> Result<()> {
+    pub fn draw_box(&mut self, qhandle: &QueueHandle<State>, rect: Option<MRegion>) -> Result<()> {
         if (rect.is_none() && self.drawings.is_empty()) || self.last_drawing.1 == rect {
             return Ok(());
         }
@@ -119,25 +109,30 @@ impl Overlay {
 
         let (w, h) = self.initialized_res().unwrap();
 
-        let (index, drawing) =
-            if let Some(drawing) = self.drawings.iter_mut().enumerate().find(|(_, d)| !d.locked) {
-                drawing
-            } else {
-                let index = self.drawings.len();
-                if index > 3 {
-                    bail!("Too many drawings, they're not being unlocked");
-                }
-                debug!("Creating drawing {index} for {:?}", self.output);
+        // Even if it has the same rectangle drawn, we need to find one that's unlocked
+        let (index, drawing) = if let Some(drawing) =
+            self.drawings.iter_mut().enumerate().find(|(_, d)| !d.locked && d.drawn == rect)
+        {
+            drawing
+        } else if let Some(drawing) = self.drawings.iter_mut().enumerate().find(|(_, d)| !d.locked)
+        {
+            drawing
+        } else {
+            let index = self.drawings.len();
+            if index > 3 {
+                bail!("Too many drawings, they're not being unlocked");
+            }
+            debug!("Creating drawing {index} for {:?}", self.output);
 
-                let buffer = protos.create_buffer(
-                    qhandle,
-                    self.transparent_format,
-                    w,
-                    h,
-                    DrawingKey(self.output, index),
-                )?;
-                (index, self.drawings.push_mut(Drawing { buffer, drawn: None, locked: false }))
-            };
+            let buffer = self.protos.create_buffer(
+                qhandle,
+                self.transparent_format,
+                w,
+                h,
+                DrawingKey(self.output, index),
+            )?;
+            (index, self.drawings.push_mut(Drawing { buffer, drawn: None, locked: false }))
+        };
 
         // TODO - it'd be faster to keep and reuse a single fully transparent buffer for when
         // nothing is visible
@@ -158,27 +153,25 @@ impl Overlay {
 
         Ok(())
     }
-}
 
-impl Protos {
-    #[instrument(level = "error", skip(self, qh))]
-    pub fn setup_overlay(
-        &self,
+    #[instrument(level = "error", skip(protos, qh, wl_out))]
+    pub fn new(
+        protos: &Rc<Protos>,
         qh: &QueueHandle<State>,
         output: OutputKey,
         wl_out: &WlOutput,
         transparent_format: Format,
         transform: Transform,
         magnifier: bool,
-    ) -> Result<Overlay> {
-        let compositor = self.compositor();
+    ) -> Result<Self> {
+        let compositor = protos.compositor();
 
         let freeze_surface = compositor.create_surface(qh, output);
-        let fract_scale = self.fractional().get_fractional_scale(&freeze_surface, qh, output);
+        let fract_scale = protos.fractional().get_fractional_scale(&freeze_surface, qh, output);
 
-        let freeze_port = self.viewporter().get_viewport(&freeze_surface, qh, NoopIgnore);
+        let freeze_port = protos.viewporter().get_viewport(&freeze_surface, qh, NoopIgnore);
 
-        let layer_shell = self.layer_shell();
+        let layer_shell = protos.layer_shell();
         let layer_surface = layer_shell.get_layer_surface(
             &freeze_surface,
             Some(wl_out),
@@ -200,18 +193,20 @@ impl Protos {
         region.destroy();
 
 
-        let overlay_port = self.viewporter().get_viewport(&overlay_surface, qh, NoopIgnore);
-        let overlay_subsurface =
-            self.subcompositor()
-                .get_subsurface(&overlay_surface, &freeze_surface, qh, NoopIgnore);
+        let overlay_port = protos.viewporter().get_viewport(&overlay_surface, qh, NoopIgnore);
+        let overlay_subsurface = protos.subcompositor().get_subsurface(
+            &overlay_surface,
+            &freeze_surface,
+            qh,
+            NoopIgnore,
+        );
 
-        let magnifier =
-            if magnifier { Some(self.setup_magnifier(qh, &freeze_surface)?) } else { None };
 
         freeze_surface.commit();
 
-        Ok(Overlay {
+        Ok(Self {
             output,
+            protos: protos.clone(),
 
             fract_scale,
             layer_surface,
@@ -229,7 +224,7 @@ impl Protos {
             drawings: Vec::new(),
             last_drawing: Default::default(),
 
-            magnifier,
+            magnifier: OnceCell::default(),
             unscaled: OnceCell::default(),
             scale: OnceCell::default(),
             transform,
@@ -362,7 +357,7 @@ impl Dispatch<WlCallback, State> for OverlayKey {
         state.try_handle(|state| {
             let overlay = state.outputs.get_mut(&self.0).unwrap().overlay.get_mut().unwrap();
             overlay.overlay_frame = None;
-            overlay.draw_box(&state.protos, qhandle, overlay.pending_region)
+            overlay.draw_box(qhandle, overlay.pending_region)
         });
     }
 }

@@ -12,7 +12,7 @@ use crate::util::{LFRegion, LRegion, Monitor};
 use crate::wayland::capture::Capture;
 use crate::wayland::overlay::Overlay;
 use crate::wayland::protos::Protos;
-use crate::wayland::{OutputKey, SelectMode, State, Transform};
+use crate::wayland::{Mode, OutputKey, State, Transform};
 
 
 #[derive(Debug)]
@@ -44,14 +44,13 @@ impl Output {
 
     pub fn draw_region(
         &mut self,
-        protos: &Protos,
         qhandle: &QueueHandle<State>,
         region: Option<LFRegion>,
     ) -> Result<()> {
         // TODO[transforms]
         let region = region.and_then(|r| self.monitor.intersect_float(&r));
 
-        self.overlay.get_mut().unwrap().draw_box(protos, qhandle, region)
+        self.overlay.get_mut().unwrap().draw_box(qhandle, region)
     }
 }
 
@@ -130,7 +129,7 @@ impl Dispatch<WlOutput, State> for OutputKey {
             trace!("Calculated monitor scale as {scale}");
             output.monitor.scale = scale;
 
-            if state.screenshot {
+            if state.mode.shot() {
                 // TODO -- allow cursor?
                 let source = state.protos.output_capture();
                 let source = source.create_source(&output.wl_output, qh, NoopIgnore);
@@ -146,17 +145,17 @@ impl Dispatch<WlOutput, State> for OutputKey {
                     .map_err(|_| eyre!("Output {:?} reconfigured", self))?;
             }
 
-            if state.select_mode.sel() {
-                let magnifier = state.screenshot && state.select_mode == SelectMode::Region;
+            if state.mode.sel() {
                 output
                     .overlay
-                    .set(state.protos.setup_overlay(
+                    .set(Overlay::new(
+                        &state.protos,
                         qh,
                         *self,
                         &output.wl_output,
                         format,
                         output.monitor.transform,
-                        magnifier,
+                        state.mode.magnifier(),
                     )?)
                     .unwrap();
             }

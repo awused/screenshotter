@@ -87,9 +87,13 @@ impl Monitor {
         LFRegion {
             x,
             y,
-            width: self.scale,
-            height: self.scale,
+            width: 1. / self.scale,
+            height: 1. / self.scale,
         }
+    }
+
+    pub fn local_pixel(&self, point: MLPoint) -> (i32, i32) {
+        ((point.x * self.scale).floor() as _, (point.y * self.scale).floor() as _)
     }
 
     pub fn local_to_global(&self, point: MLPoint) -> LPoint {
@@ -139,7 +143,7 @@ impl Monitor {
 }
 
 impl LFRegion {
-    pub fn upper_left(&self) -> LPoint {
+    pub const fn upper_left(&self) -> LPoint {
         LPoint { x: self.x, y: self.y }
     }
 

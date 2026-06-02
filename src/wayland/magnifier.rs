@@ -1,15 +1,21 @@
+use core::slice;
+use std::cell::OnceCell;
 use std::mem::swap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use color_eyre::Result;
+use color_eyre::eyre::bail;
+use wayland_client::protocol::wl_buffer::WlBuffer;
+use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{NoopIgnore, QueueHandle};
+use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
 use crate::util::{MLPoint, MRegion, Monitor};
-use crate::wayland::State;
 use crate::wayland::protos::{Buffer, Protos};
+use crate::wayland::{OutputKey, State, Transform};
 
 // Must be odd
 const RES: usize = 11;
@@ -17,28 +23,55 @@ const SCALE: usize = 20;
 const LARGE_RES: usize = RES * SCALE;
 const PADDING: i32 = 30;
 
+struct MagnifierViewKey(OutputKey, usize);
+struct MagnifierKey(OutputKey);
+
+#[derive(Debug)]
+struct View {
+    locked: bool,
+    buffer: Buffer,
+    origin: (i32, i32),
+}
+
 // TODO -- properly make this nearest-neighbour
 #[derive(Debug)]
 pub struct Magnifier {
-    pub zoom_surface: WlSurface,
-    pub zoom_subsurface: WlSubsurface,
-    pub zoom_viewport: WpViewport,
+    protos: Rc<Protos>,
+    output: OutputKey,
+    monitor: Monitor,
 
-    pub crosshair_surface: WlSurface,
-    pub crosshair_subsurface: WlSubsurface,
-    pub crosshair_viewport: WpViewport,
+    zoom_surface: WlSurface,
+    zoom_subsurface: WlSubsurface,
+    zoom_viewport: WpViewport,
+
+    crosshair_surface: WlSurface,
+    crosshair_subsurface: WlSubsurface,
+    crosshair_viewport: WpViewport,
+
+    pending: Option<MLPoint>,
+    views: Vec<View>,
+    last_view: Option<usize>,
+
+    zoom_frame: Option<WlCallback>,
+
+    frozen: Rc<Buffer>,
+    cross: Rc<Buffer>,
 }
 
 impl Magnifier {
-    pub fn hide(&self) {
+    pub fn hide(&mut self) {
         trace!("Hiding magnifier");
+        self.last_view = None;
+        self.pending = None;
+        self.zoom_frame = None;
+
         self.zoom_surface.attach(None, 0, 0);
         self.crosshair_surface.attach(None, 0, 0);
         self.zoom_surface.commit();
         self.crosshair_surface.commit();
     }
 
-    pub fn show(&self, freeze: &Buffer, crosshair: &Buffer) {
+    pub fn show(&self, freeze: &Rc<Buffer>, crosshair: &Buffer) {
         trace!("Displaying magnifier");
         self.zoom_surface.attach(Some(&freeze.wl_buffer), 0, 0);
         self.crosshair_surface.attach(Some(&crosshair.wl_buffer), 0, 0);
@@ -47,18 +80,73 @@ impl Magnifier {
         self.crosshair_surface.damage(0, 0, LARGE_RES as _, LARGE_RES as _);
     }
 
-    // TODO[transform]
-    pub fn position(
-        &self,
-        MLPoint { x, y }: MLPoint,
-        mut bounds: (u32, u32),
-        monitor: &Monitor,
-    ) -> bool {
+    pub fn draw(&mut self, qh: &QueueHandle<State>, point: MLPoint) -> Result<bool> {
+        if self.zoom_frame.is_some() {
+            self.pending = Some(point);
+            return Ok(false);
+        }
+
+        let origin = self.monitor.local_pixel(point);
+
+        let (index, view) = if let Some(view) =
+            self.views.iter_mut().enumerate().find(|(_, v)| !v.locked && v.origin == origin)
+        {
+            view
+        } else if let Some(view) = self.views.iter_mut().enumerate().find(|(_, v)| !v.locked) {
+            view
+        } else {
+            let index = self.views.len();
+            if index > 3 {
+                bail!("Too many magnifier views, they're not being unlocked");
+            }
+            debug!("Creating magnifier {index} for {:?}", self.output);
+
+            let buffer = self.protos.create_buffer(
+                qh,
+                self.frozen.format,
+                LARGE_RES as _,
+                LARGE_RES as _,
+                MagnifierViewKey(self.output, index),
+            )?;
+            (index, self.views.push_mut(View { buffer, origin: (-1, -1), locked: false }))
+        };
+        view.locked = true;
+
+        if origin != view.origin {
+            view.origin = origin;
+            // SAFETY: we checked it was unlocked or newly created it
+            unsafe {
+                view.draw(&self.frozen);
+            }
+            // draw
+        }
+
+
+        if self.last_view.is_none() {
+            self.crosshair_surface.attach(Some(&self.cross.wl_buffer), 0, 0);
+            self.crosshair_surface.damage(0, 0, LARGE_RES as _, LARGE_RES as _);
+        }
+
+        self.zoom_surface.attach(Some(&view.buffer.wl_buffer), 0, 0);
+        self.position(point);
+
+        self.zoom_surface.damage(0, 0, LARGE_RES as _, LARGE_RES as _);
+        self.zoom_frame = Some(self.zoom_surface.frame(qh, MagnifierKey(self.output)));
+
+        self.crosshair_surface.commit();
+        self.zoom_surface.commit();
+
+        self.last_view = Some(index);
+
+        Ok(true)
+    }
+
+    fn position(&self, MLPoint { x, y }: MLPoint) {
         let log_x = x.round() as i32;
         let log_y = y.round() as i32;
 
         let mut pos_x = log_x + PADDING;
-        if pos_x + LARGE_RES as i32 >= bounds.0 as i32 {
+        if pos_x + LARGE_RES as i32 >= self.monitor.logical.width {
             pos_x = log_x - LARGE_RES as i32 - PADDING;
         }
 
@@ -67,25 +155,40 @@ impl Magnifier {
             pos_y = log_y + PADDING;
         }
 
-        self.zoom_surface.set_buffer_transform(monitor.transform.freeze_transform());
+        // TODO[transforms]
+        self.zoom_surface
+            .set_buffer_transform(self.monitor.transform.freeze_transform());
+
         // TODO -- investigate more
         // seems like the right position, but it glitches out outside of the untransformed bounds
         // Compositor bug?
+
         self.zoom_subsurface.set_position(pos_x, pos_y);
         self.crosshair_subsurface.set_position(pos_x, pos_y);
+    }
+
+    // TODO[transform]
+    fn draw_nn(
+        &self,
+        MLPoint { x, y }: MLPoint,
+        mut bounds: (u32, u32),
+        monitor: &Monitor,
+    ) -> bool {
+        let phys = &self.monitor.physical;
+
 
         let scale = monitor.scale;
         let mut true_x = (x * scale).trunc() as i32;
         let mut true_y = (y * scale).trunc() as i32;
         // TODO -- more handling, this is just to avoid crashes
-        if monitor.transform.rotate() {
-            swap(&mut true_x, &mut true_y);
-        }
+        // if monitor.transform.rotate() {
+        //     swap(&mut true_x, &mut true_y);
+        // }
 
         if true_x < 0
-            || true_x >= monitor.physical.width
+            || true_x >= self.monitor.physical.width
             || true_y < 0
-            || true_y >= monitor.physical.height
+            || true_y >= self.monitor.physical.height
         {
             // warn!("Got bogus mouse position {true_x},{true_y} in {monitor:?}, ignoring");
             return false;
@@ -101,9 +204,9 @@ impl Magnifier {
             right += left;
             left = 0;
         }
-        if right > monitor.physical.width {
+        if right > self.monitor.physical.width {
             left += right - (monitor.physical.width);
-            right = monitor.physical.width;
+            right = self.monitor.physical.width;
         }
 
         if top < 0 {
@@ -128,36 +231,47 @@ impl Magnifier {
         self.crosshair_surface.commit();
         true
     }
-}
 
-impl Protos {
     #[instrument(level = "error", skip_all)]
-    pub fn setup_magnifier(
-        &self,
+    pub fn new(
+        protos: &Rc<Protos>,
         qh: &QueueHandle<State>,
+        output: OutputKey,
+        monitor: &Monitor,
         freeze_surface: &WlSurface,
-    ) -> Result<Magnifier> {
-        let zoom_surface = self.compositor().create_surface(qh, NoopIgnore);
-        let region = self.compositor().create_region(qh, NoopIgnore);
+        frozen: &Rc<Buffer>,
+        cross: &Rc<Buffer>,
+    ) -> Result<Self> {
+        let zoom_surface = protos.compositor().create_surface(qh, NoopIgnore);
+        let region = protos.compositor().create_region(qh, NoopIgnore);
         zoom_surface.set_input_region(Some(&region));
 
         let zoom_subsurface =
-            self.subcompositor()
+            protos
+                .subcompositor()
                 .get_subsurface(&zoom_surface, freeze_surface, qh, NoopIgnore);
 
-        let zoom_viewport = self.viewporter().get_viewport(&zoom_surface, qh, NoopIgnore);
+        let zoom_viewport = protos.viewporter().get_viewport(&zoom_surface, qh, NoopIgnore);
 
-        let crosshair_surface = self.compositor().create_surface(qh, NoopIgnore);
+        let crosshair_surface = protos.compositor().create_surface(qh, NoopIgnore);
         crosshair_surface.set_input_region(Some(&region));
         region.destroy();
 
-        let crosshair_subsurface =
-            self.subcompositor()
-                .get_subsurface(&crosshair_surface, freeze_surface, qh, NoopIgnore);
+        let crosshair_subsurface = protos.subcompositor().get_subsurface(
+            &crosshair_surface,
+            freeze_surface,
+            qh,
+            NoopIgnore,
+        );
 
-        let crosshair_viewport = self.viewporter().get_viewport(&crosshair_surface, qh, NoopIgnore);
+        let crosshair_viewport =
+            protos.viewporter().get_viewport(&crosshair_surface, qh, NoopIgnore);
 
-        Ok(Magnifier {
+        Ok(Self {
+            protos: protos.clone(),
+            output,
+            monitor: *monitor,
+
             zoom_surface,
             zoom_subsurface,
             zoom_viewport,
@@ -165,13 +279,68 @@ impl Protos {
             crosshair_surface,
             crosshair_subsurface,
             crosshair_viewport,
+
+            pending: None,
+            views: Vec::new(),
+            last_view: None,
+
+            zoom_frame: None,
+
+            frozen: frozen.clone(),
+            cross: cross.clone(),
         })
+    }
+}
+
+impl View {
+    // Cannot be run between commit() and the release
+    unsafe fn draw(&mut self, frozen: &Buffer) {
+        let bytes = frozen.format.size();
+        let frozen_stride = bytes * frozen.width;
+        let stride = bytes * self.buffer.width;
+
+        let inset = RES as i32 / 2;
+
+        // Could slightly optimizing drawing off-monitor area but probably not worth it
+        unsafe {
+            for y in 0..RES as i32 {
+                for x in 0..RES as i32 {
+                    let true_x = x - inset + self.origin.0;
+                    let true_y = y - inset + self.origin.1;
+                    let pixel = if true_x >= 0
+                        && (true_x as usize) < frozen.width
+                        && true_y >= 0
+                        && (true_y as usize) < frozen.height
+                    {
+                        let offset = (true_y as usize) * frozen_stride + (true_x as usize) * bytes;
+                        debug_assert!(offset + bytes <= frozen.buf_size);
+                        slice::from_raw_parts(frozen.buf.cast::<u8>().add(offset), bytes)
+                    } else {
+                        // Works for rgba and bgr
+                        &[0, 0, 0, 255][0..bytes]
+                    };
+
+                    let start = (y as usize * stride + x as usize * bytes) * SCALE;
+                    for j in 0..SCALE {
+                        for i in 0..SCALE {
+                            let out = start + j * stride + i * bytes;
+                            debug_assert!(out + bytes <= self.buffer.buf_size);
+                            slice::from_raw_parts_mut(self.buffer.buf.cast::<u8>().add(out), bytes)
+                                .copy_from_slice(pixel);
+                        }
+                    }
+                    // let frozen_pixel =
+                    //     (y + self.origin.1 - inset) * frozen_stride
+                    //         + (x + self.origin.0 - inset) * bytes as i32;
+                    // let pixel = frozen.buf.add();
+                }
+            }
+        }
     }
 }
 
 
 pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buffer> {
-    let start = Instant::now();
     let format = state.transparent_format();
     let buffer =
         state
@@ -230,6 +399,53 @@ pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buf
     }
 
     Ok(buffer)
+}
+
+impl Dispatch<WlBuffer, State> for MagnifierViewKey {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlBuffer,
+        event: <WlBuffer as wayland_client::Proxy>::Event,
+        conn: &wayland_client::Connection,
+        qhandle: &QueueHandle<State>,
+    ) {
+        state
+            .outputs
+            .get_mut(&self.0)
+            .unwrap()
+            .overlay
+            .get_mut()
+            .unwrap()
+            .magnifier
+            .get_mut()
+            .unwrap()
+            .views[self.1]
+            .locked = false;
+    }
+}
+
+impl Dispatch<WlCallback, State> for MagnifierKey {
+    fn event(
+        &self,
+        state: &mut State,
+        proxy: &WlCallback,
+        event: <WlCallback as wayland_client::Proxy>::Event,
+        conn: &wayland_client::Connection,
+        qh: &QueueHandle<State>,
+    ) {
+        state.try_handle(|state| {
+            let overlay = state.outputs.get_mut(&self.0).unwrap().overlay.get_mut().unwrap();
+            let mag = overlay.magnifier.get_mut().unwrap();
+
+            mag.zoom_frame.take();
+            if let Some(point) = mag.pending.take() {
+                overlay.move_magnifier(qh, point)?;
+            }
+
+            Ok(())
+        });
+    }
 }
 
 impl Drop for Magnifier {

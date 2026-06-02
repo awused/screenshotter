@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use color_eyre::eyre::{bail, eyre};
 use wayland_client::{Dispatch, NoopIgnore};
@@ -25,7 +26,7 @@ pub struct Capture {
     // TODO -- test transforms or remove
     pub transform: Transform,
 
-    pub buffer: OnceCell<Buffer>,
+    pub buffer: OnceCell<Rc<Buffer>>,
 
     pub done: bool,
 }
@@ -106,7 +107,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, State> for OutputKey {
                         .frame
                         .set(frame)
                         .map_err(|_| eyre!("Capture frame reconfigured for {self:?} {output:?}"))?;
-                    output.capture.buffer.set(buffer).unwrap();
+                    output.capture.buffer.set(buffer.into()).unwrap();
                 }
                 Event::Stopped => {
                     bail!("Image copy capture session stopped for {self:?}: {output:?}");

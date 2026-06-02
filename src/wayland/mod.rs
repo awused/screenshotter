@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use color_eyre::eyre::{bail, eyre};
 use color_eyre::{Report, Result};
@@ -19,6 +20,7 @@ use xkbcommon::xkb::{Context, Keycode, Keymap, Keysym, State as XkbState};
 use crate::CLICK_TIME_MS;
 use crate::ipc::Window;
 use crate::util::{LFRegion, LRegion, MLPoint, MRegion};
+use crate::wayland::magnifier::Magnifier;
 use crate::wayland::output::Output;
 use crate::wayland::protos::{Buffer, Protos};
 
@@ -96,11 +98,35 @@ enum Status {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum SelectMode {
-    Nothing,
+pub enum Mode {
+    ScreenshotOnly,
     Region,
-    Window,
+    PickWindow,
 }
+
+impl Mode {
+    pub const fn sel(self) -> bool {
+        match self {
+            Self::ScreenshotOnly => false,
+            Self::Region | Self::PickWindow => true,
+        }
+    }
+
+    pub const fn shot(self) -> bool {
+        match self {
+            Self::ScreenshotOnly | Self::Region => true,
+            Self::PickWindow => false,
+        }
+    }
+
+    pub const fn magnifier(self) -> bool {
+        match self {
+            Self::Region => true,
+            Self::ScreenshotOnly | Self::PickWindow => false,
+        }
+    }
+}
+
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -119,7 +145,15 @@ impl Selected {
         }
     }
 
-    pub fn l_region(&self) -> Option<LRegion> {
+    pub fn region(&self) -> Option<LFRegion> {
+        match self {
+            Self::Nothing => None,
+            Self::Region(lfregion) | Self::RegionWindow(lfregion, _) => Some(*lfregion),
+            Self::Window(window) => Some(window.region().into()),
+        }
+    }
+
+    pub fn int_region(&self) -> Option<LRegion> {
         match self {
             Self::Nothing => None,
             Self::Region(lfregion) | Self::RegionWindow(lfregion, _) => Some(lfregion.int_region()),
@@ -127,16 +161,6 @@ impl Selected {
         }
     }
 }
-
-impl SelectMode {
-    pub const fn sel(self) -> bool {
-        match self {
-            Self::Nothing => false,
-            Self::Region | Self::Window => true,
-        }
-    }
-}
-
 
 pub enum SelectState {
     Hovering,
@@ -151,19 +175,16 @@ pub enum SelectState {
 }
 
 struct State {
-    // Expect to take a screenshot
-    screenshot: bool,
-    // Expect to perform selection
-    select_mode: SelectMode,
+    mode: Mode,
     status: Status,
 
     // For now we only really support capturing the same format as we overlay
     formats: BTreeSet<Format>,
     outputs: BTreeMap<OutputKey, Output>,
 
-    magnifier_crosshairs: OnceCell<Buffer>,
+    magnifier_crosshairs: OnceCell<Rc<Buffer>>,
 
-    protos: Protos,
+    protos: Rc<Protos>,
 
     mouse: MouseState,
     keystate: Option<XkbState>,
@@ -181,12 +202,12 @@ impl State {
             Status::Selecting | Status::Initializing | Status::Done(_) => {}
             Status::Waiting => {
                 let pending_shots =
-                    self.screenshot && self.outputs.values().any(|o| !o.capture.done);
-                let pending_overlays = self.select_mode.sel()
+                    self.mode.shot() && self.outputs.values().any(|o| !o.capture.done);
+                let pending_overlays = self.mode.sel()
                     && self.outputs.values().any(|o| o.overlay.get().is_none_or(|o| !o.ready()));
 
                 if !pending_shots && !pending_overlays {
-                    if self.select_mode.sel() {
+                    if self.mode.sel() {
                         self.status = Status::Selecting
                     } else {
                         self.status = Status::Done(Selected::Nothing)
@@ -210,13 +231,13 @@ impl State {
     // Returns Ok(false) if there's pending work and it needs to be called later
     #[instrument(level = "error", skip(self, qh))]
     fn try_finish_overlay(&self, qh: &QueueHandle<Self>, key: OutputKey) -> Result<bool> {
-        if !self.screenshot && !self.select_mode.sel() {
+        if !self.mode.sel() {
             return Ok(true);
         }
 
         let output = &self.outputs[&key];
         let (capture, overlay) = (&output.capture, &output.overlay.get().unwrap());
-        if self.screenshot && !capture.done {
+        if self.mode.shot() && !capture.done {
             return Ok(false);
         }
         let Some(res) = overlay.initialized_res() else {
@@ -229,7 +250,7 @@ impl State {
             .freeze_surface
             .set_buffer_transform(overlay.transform.freeze_transform());
 
-        if !self.screenshot {
+        if !self.mode.shot() {
             // Always attach a dummy so we can map the freeze layer even if we never render
             // anything
             let dummy = self.protos.create_buffer(
@@ -257,8 +278,22 @@ impl State {
         let buffer = capture.buffer.get().unwrap();
 
         overlay.freeze_surface.attach(Some(&buffer.wl_buffer), 0, 0);
-
         overlay.freeze_surface.commit();
+
+        if self.mode.magnifier() {
+            let cross = self.magnifier_crosshairs.get().unwrap();
+            let mag = Magnifier::new(
+                &self.protos,
+                qh,
+                key,
+                &output.monitor,
+                &overlay.freeze_surface,
+                buffer,
+                cross,
+            )?;
+            overlay.magnifier.set(mag).unwrap();
+        }
+
         Ok(true)
     }
 
@@ -272,11 +307,6 @@ impl State {
             .iter()
             .find(|(_k, v)| v.overlay.get().unwrap().freeze_surface == surface)
             .unwrap();
-
-        if let Some(crosshair) = self.magnifier_crosshairs.get() {
-            let freeze_buffer = output.capture.buffer.get().unwrap();
-            output.overlay.get().unwrap().show_magnifier(freeze_buffer, crosshair);
-        }
 
         self.mouse.hover = Some((surface, *key));
         self.mouse.point = point;
@@ -292,7 +322,7 @@ impl State {
             warn!("Mouse left surface {surface:?} it wasn't in");
         }
 
-        self.outputs[&out].overlay.get().unwrap().hide_magnifier();
+        self.outputs.get_mut(&out).unwrap().overlay.get_mut().unwrap().hide_magnifier();
     }
 
     // Don't handle enter/leave/motion immediately since they can be part of the same event
@@ -303,8 +333,17 @@ impl State {
 
         let Some((ref surface, outkey)) = self.mouse.hover else { return };
 
-        let output = &self.outputs[&outkey];
-        output.overlay.get().unwrap().move_magnifier(&self.mouse, &output.monitor);
+        if let Err(e) = self
+            .outputs
+            .get_mut(&outkey)
+            .unwrap()
+            .overlay
+            .get_mut()
+            .unwrap()
+            .move_magnifier(qh, self.mouse.point)
+        {
+            self.error = Some(e);
+        }
 
         self.update_overlay(qh);
     }
@@ -329,7 +368,7 @@ impl State {
                     out.monitor.global_pixel_bounds(self.mouse.point).bounding_region(&start_pixel);
 
                 self.outputs.values_mut().for_each(|out| {
-                    if let Err(e) = out.draw_region(&self.protos, qh, Some(*region)) {
+                    if let Err(e) = out.draw_region(qh, Some(*region)) {
                         self.error = Some(e);
                     }
                 });
@@ -361,7 +400,7 @@ impl State {
         };
 
         self.outputs.values_mut().for_each(|out| {
-            if let Err(e) = out.draw_region(&self.protos, qh, region) {
+            if let Err(e) = out.draw_region(qh, region) {
                 self.error = Some(e);
             }
         });
@@ -386,25 +425,23 @@ impl State {
 
 
         if b_state == ButtonState::Pressed {
-            let initial_window = match (&self.select_state, self.select_mode) {
-                (_, SelectMode::Nothing) | (SelectState::Hovering, SelectMode::Window) => return,
+            let initial_window = match (&self.select_state, self.mode) {
+                (_, Mode::ScreenshotOnly) | (SelectState::Hovering, Mode::PickWindow) => return,
                 (SelectState::Dragging { .. }, _) => {
                     debug!("Got left button press while dragging. Ignoring.");
                     return;
                 }
-                (SelectState::OverWindow(i), SelectMode::Window) => {
+                (SelectState::OverWindow(i), Mode::PickWindow) => {
                     debug!("Mouse down on window, selecting");
                     self.status = Status::Done(Selected::Window(self.windows.swap_remove(*i)));
 
                     // self.final_selection = FinalSelection::Window(self.windows.swap_remove(*i));
                     return;
                 }
-                (SelectState::Hovering, SelectMode::Region) => {
-                    error!("TODO -- start dragging");
-                    None
-                }
-                (SelectState::OverWindow(i), SelectMode::Region) => Some(*i),
+                (SelectState::Hovering, Mode::Region) => None,
+                (SelectState::OverWindow(i), Mode::Region) => Some(*i),
             };
+
 
             let Some((_, out)) = self.mouse.hover else {
                 error!("Mouse down outside of surface. This should never happen.");
@@ -412,6 +449,8 @@ impl State {
             };
 
             let start_pixel = self.outputs[&out].monitor.global_pixel_bounds(self.mouse.point);
+            debug!("Drag started at {start_pixel:?}");
+
             self.select_state = SelectState::Dragging {
                 start_pixel,
                 region: start_pixel,
@@ -427,7 +466,6 @@ impl State {
             } = self.select_state
         {
             if time.wrapping_sub(start_time) <= CLICK_TIME_MS {
-                println!("It was a click");
                 if let Some(i) = initial_window {
                     self.status = Status::Done(Selected::Window(self.windows.swap_remove(i)));
                 } else {
@@ -480,6 +518,15 @@ impl State {
 
         error!("{}", segments.len());
         Ok(())
+    }
+
+    fn init_magnifiers(&mut self) -> Result<()> {
+        if self.mode.magnifier() {
+            return Ok(());
+        }
+
+
+        todo!()
     }
 }
 
