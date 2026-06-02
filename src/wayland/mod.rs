@@ -63,26 +63,6 @@ enum Format {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transform(wl_output::Transform);
 
-impl Transform {
-    const fn rotate(self) -> bool {
-        !self.0.0.is_multiple_of(2)
-    }
-
-    // TODO -- this is inconsistent between hyprland and sway, needs work.
-    const fn freeze_transform(self) -> wl_output::Transform {
-        match self.0.0 {
-            1 => wl_output::Transform::_270,
-            3 => wl_output::Transform::_90,
-            _ => self.0,
-        }
-    }
-}
-
-impl Default for Transform {
-    fn default() -> Self {
-        Self(wl_output::Transform::Normal)
-    }
-}
 
 #[derive(Debug)]
 struct Hover {
@@ -633,5 +613,40 @@ impl Format {
             Self::Argb8888 => wl_shm::Format::Argb8888,
             Self::Bgr888 => wl_shm::Format::Bgr888,
         }
+    }
+}
+
+impl Transform {
+    const fn rotate(self) -> bool {
+        !self.0.0.is_multiple_of(2)
+    }
+
+    // TODO -- this is inconsistent between hyprland and sway, needs work.
+    const fn freeze_transform(self) -> wl_output::Transform {
+        match self.0.0 {
+            1 => wl_output::Transform::_270,
+            3 => wl_output::Transform::_90,
+            _ => self.0,
+        }
+    }
+
+    // TODO -- inconsistent between hyprland and sway?
+    const fn correct(self, (x, y): (i32, i32), (width, height): (usize, usize)) -> (i32, i32) {
+        match self.0.0 {
+            1 => (y, height as i32 - x - 1),
+            2 => (width as i32 - x - 1, height as i32 - y - 1),
+            3 => (width as i32 - y - 1, x),
+            4 => (width as i32 - x - 1, y),
+            5 => (y, x),
+            6 => (x, height as i32 - y - 1),
+            7 => (width as i32 - y - 1, height as i32 - x - 1),
+            _ => (x, y),
+        }
+    }
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self(wl_output::Transform::Normal)
     }
 }

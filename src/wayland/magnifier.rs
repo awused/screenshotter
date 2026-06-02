@@ -116,7 +116,7 @@ impl Magnifier {
             view.origin = origin;
             // SAFETY: we checked it was unlocked or newly created it
             unsafe {
-                view.draw(&self.frozen);
+                view.draw(&self.frozen, self.monitor.transform);
             }
             // draw
         }
@@ -157,9 +157,6 @@ impl Magnifier {
             pos_y = log_y + PADDING;
         }
 
-        // TODO[transforms]
-        self.zoom_surface
-            .set_buffer_transform(self.monitor.transform.freeze_transform());
 
         // TODO -- investigate more
         // seems like the right position, but it glitches out outside of the untransformed bounds
@@ -167,71 +164,6 @@ impl Magnifier {
 
         self.zoom_subsurface.set_position(pos_x, pos_y);
         self.crosshair_subsurface.set_position(pos_x, pos_y);
-    }
-
-    // TODO[transform]
-    fn draw_nn(
-        &self,
-        MLPoint { x, y }: MLPoint,
-        mut bounds: (u32, u32),
-        monitor: &Monitor,
-    ) -> bool {
-        let phys = &self.monitor.physical;
-
-
-        let scale = monitor.scale;
-        let mut true_x = (x * scale).trunc() as i32;
-        let mut true_y = (y * scale).trunc() as i32;
-        // TODO -- more handling, this is just to avoid crashes
-        // if monitor.transform.rotate() {
-        //     swap(&mut true_x, &mut true_y);
-        // }
-
-        if true_x < 0
-            || true_x >= self.monitor.physical.width
-            || true_y < 0
-            || true_y >= self.monitor.physical.height
-        {
-            // warn!("Got bogus mouse position {true_x},{true_y} in {monitor:?}, ignoring");
-            return false;
-        }
-
-        let mut left = true_x - RES as i32 / 2;
-        let mut right = true_x + RES as i32 / 2 + 1;
-        let mut top = true_y - RES as i32 / 2;
-        let mut bottom = true_y + RES as i32 / 2 + 1;
-
-        // Clamp while keeping the center
-        if left < 0 {
-            right += left;
-            left = 0;
-        }
-        if right > self.monitor.physical.width {
-            left += right - (monitor.physical.width);
-            right = self.monitor.physical.width;
-        }
-
-        if top < 0 {
-            bottom += top;
-            top = 0;
-        }
-        if bottom > monitor.physical.height {
-            top += bottom - (monitor.physical.height);
-            bottom = monitor.physical.height;
-        }
-        // TODO -- adjust the output to compensate or don't bother?
-
-        self.zoom_viewport.set_source(
-            left as f64,
-            top as f64,
-            (right - left) as f64,
-            (bottom - top) as f64,
-        );
-        self.zoom_viewport.set_destination(LARGE_RES as i32, LARGE_RES as i32);
-
-        self.zoom_surface.commit();
-        self.crosshair_surface.commit();
-        true
     }
 
     #[instrument(level = "error", skip_all)]
@@ -296,7 +228,7 @@ impl Magnifier {
 
 impl View {
     // Cannot be run between commit() and the release
-    unsafe fn draw(&mut self, frozen: &Buffer) {
+    unsafe fn draw(&mut self, frozen: &Buffer, transform: Transform) {
         let bytes = frozen.format.size();
         let frozen_stride = bytes * frozen.width;
         let stride = bytes * self.buffer.width;
@@ -309,6 +241,9 @@ impl View {
                 for x in 0..RES as i32 {
                     let true_x = x - inset + self.origin.0;
                     let true_y = y - inset + self.origin.1;
+                    let (true_x, true_y) =
+                        transform.correct((true_x, true_y), (frozen.width, frozen.height));
+
                     let pixel = if true_x >= 0
                         && (true_x as usize) < frozen.width
                         && true_y >= 0
@@ -331,10 +266,6 @@ impl View {
                                 .copy_from_slice(pixel);
                         }
                     }
-                    // let frozen_pixel =
-                    //     (y + self.origin.1 - inset) * frozen_stride
-                    //         + (x + self.origin.0 - inset) * bytes as i32;
-                    // let pixel = frozen.buf.add();
                 }
             }
         }
