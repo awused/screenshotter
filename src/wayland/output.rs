@@ -47,7 +47,6 @@ impl Output {
         qhandle: &QueueHandle<State>,
         region: Option<LFRegion>,
     ) -> Result<()> {
-        // TODO[transforms]
         let region = region.and_then(|r| self.monitor.intersect_rounded(&r)).map(|(l, m)| m);
 
         self.overlay.get_mut().unwrap().draw_box(qhandle, region)
@@ -121,7 +120,6 @@ impl Dispatch<WlOutput, State> for OutputKey {
                 bail!("Empty region for output {self:?}");
             }
 
-            // TODO[transform]
             let scale = output.monitor.physical.width as f64 / output.monitor.logical.width as f64;
             if !scale.is_normal() || scale <= 0.01 {
                 bail!("Invalid monitor scale {scale} for {self:?}");

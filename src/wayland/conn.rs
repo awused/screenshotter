@@ -1,7 +1,9 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::io::ErrorKind;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use color_eyre::Result;
@@ -24,6 +26,7 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::pointer_warp::v1::client::wp_pointer_warp_v1::WpPointerWarpV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
@@ -36,7 +39,7 @@ use crate::ipc::Window;
 use crate::util::MLPoint;
 use crate::wayland::output::Output;
 use crate::wayland::protos::Protos;
-use crate::wayland::{Selected, Format, Global, MouseState, OutputKey, Mode, SelectState, State, Status, magnifier};
+use crate::wayland::{Format, Global, Mode, MouseState, OutputKey, SelectState, Selected, State, Status, WEIRD_TRANSFORMS, magnifier};
 
 pub struct Conn {
     queue: EventQueue<State>,
@@ -50,6 +53,15 @@ impl Conn {
     pub fn init(mode: Mode) -> Result<Self> {
         let con = Connection::connect_to_env()?;
         let display = con.display();
+
+        // Yeah this is weird
+        if let Ok(name) = env::var("XDG_CURRENT_DESKTOP")
+            && name == "Hyprland"
+        {
+            // Only affects transforms 1 and 3
+            debug!("Hyprland detected, setting weird transforms flag");
+            WEIRD_TRANSFORMS.store(true, Ordering::Relaxed);
+        }
 
         let queue = con.new_event_queue();
         let _registry = display.get_registry(&queue.handle(), Global);
@@ -76,6 +88,7 @@ impl Conn {
 
                 protos: Rc::default(),
 
+                pointer: OnceCell::default(),
                 mouse: MouseState::default(),
                 keystate: None,
                 select_state: SelectState::Hovering,
@@ -95,9 +108,8 @@ impl Conn {
         }
     }
 
-    pub async fn select(&mut self, windows: Vec<Window>) -> Result<&Selected> {
+    pub async fn run(&mut self, windows: Vec<Window>) -> Result<&Selected> {
         // Can only select if we've been preparing for it
-        assert!(self.state.mode.sel());
         if self.state.mode == Mode::PickWindow && windows.is_empty() {
             bail!("No windows available");
         }
@@ -111,6 +123,11 @@ impl Conn {
 
         if self.state.outputs.is_empty() {
             bail!("No monitors detected");
+        }
+
+        // Force a pointer frame now, to make it highlight things if it wasn't.
+        if self.state.mode.sel() {
+            self.state.pointer_frame(&self.queue.handle());
         }
 
         // I'm convinced there's a borrow checker bug here
@@ -277,6 +294,9 @@ impl Dispatch<WlRegistry, State> for Global {
                 } else if interface == WpCursorShapeManagerV1::interface().name {
                     let shape = reg.bind::<WpCursorShapeManagerV1, _, _>(name, 1, qh, NoopIgnore);
                     state.protos.shape_manager.set(shape).unwrap();
+                } else if interface == WpPointerWarpV1::interface().name {
+                    let warp = reg.bind::<WpPointerWarpV1, _, _>(name, 1, qh, NoopIgnore);
+                    state.protos.pointer_warp.set(warp).unwrap();
                 }
             }
             Event::GlobalRemove { name } if state.outputs.remove(&OutputKey(name)).is_some() => {
@@ -407,11 +427,10 @@ impl Dispatch<WlKeyboard, State> for Global {
                         state.keystate = Some(XkbState::new(&keymap));
                     }
                 }
-                Event::Enter { serial, surface, keys } => {}
-                Event::Leave { serial, surface } => {}
                 Event::Key { serial, time, key, state: key_state } => {
+                    // TODO -- consider Enter as an alternative click
                     if key_state == KeyState::Pressed {
-                        state.handle_key(key)?;
+                        state.handle_key(serial, key)?;
                     }
                 }
                 Event::Modifiers {
@@ -420,9 +439,19 @@ impl Dispatch<WlKeyboard, State> for Global {
                     mods_latched,
                     mods_locked,
                     group,
-                } => {}
-                Event::RepeatInfo { rate, delay } => {}
-                _ => {}
+                } => {
+                    if let Some(keystate) = &mut state.keystate {
+                        keystate.update_mask(
+                            mods_depressed,
+                            mods_latched,
+                            mods_locked,
+                            0,
+                            0,
+                            group,
+                        );
+                    }
+                }
+                Event::Enter { .. } | Event::Leave { .. } | Event::RepeatInfo { .. } | _ => {}
             }
             Ok(())
         });
@@ -468,7 +497,7 @@ impl Dispatch<WlSeat, State> for Global {
 
 
         if capabilities.contains(Capability::Pointer) {
-            proxy.get_pointer(qh, Self);
+            state.pointer.set(proxy.get_pointer(qh, Self));
         }
 
         if capabilities.contains(Capability::Keyboard) {

@@ -2,15 +2,18 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
-use std::thread;
+use std::thread::{self, available_parallelism};
+use std::time::Instant;
 
 use clap::Parser;
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 use futures::future::{Either, select};
 use notify_rust::{Notification, Urgency};
+use rayon::ThreadPoolBuilder;
 use serde_json::Value;
 use tokio::pin;
 
@@ -39,7 +42,13 @@ enum Command {
     /// Take a screenshot of the active window
     Window,
     /// Take a screenshot of the entire desktop
-    Desktop,
+    Desktop {
+        /// Do not scale the screenshots.
+        /// Positioning of screenshots for each monitor is consistent but based on a naive
+        /// algorithm.
+        #[arg(long)]
+        unscaled: bool,
+    },
     /// Prompt to select a region using slurp before taking a screenshot.
     /// The name and directory will be based on the center of the selected region.
     Region,
@@ -88,7 +97,7 @@ async fn main() -> Result<()> {
 
     match &OPTIONS.cmd {
         Command::Window => window().await,
-        Command::Desktop => desktop().await,
+        Command::Desktop { unscaled } => desktop(*unscaled).await,
         Command::Region => region().await,
         Command::Name => name().await,
         Command::Prop => prop().await,
@@ -101,22 +110,43 @@ async fn window() -> Result<()> {
     trace!("Starting window");
     LazyLock::force(&CONFIG);
 
+    init_threadpool();
+
     let mut con = Conn::init(Mode::ScreenshotOnly)?;
 
+    let selection = con.run(Vec::new()).await?;
+    if !matches!(Selected::Nothing, selection) {
+        bail!("Wrong selection, expected nothing, got {selection:?}");
+    }
+
+    // TODO -- get the active window from IPC
 
     con.poll().await?;
+
+    // let app = app.await?;
+
     Ok(())
 }
 
 #[instrument(level = "error", skip_all)]
-async fn desktop() -> Result<()> {
+async fn desktop(unscaled: bool) -> Result<()> {
     trace!("Starting desktop");
     LazyLock::force(&CONFIG);
 
+    init_threadpool();
+
     let mut con = Conn::init(Mode::ScreenshotOnly)?;
+    let selection = con.run(Vec::new()).await?;
+    if !matches!(Selected::Nothing, selection) {
+        bail!("Wrong selection, expected nothing, got {selection:?}");
+    }
 
+    let screenshots = con.take_screenshot()?;
 
-    con.poll().await?;
+    let combined = img::combine(screenshots, !unscaled);
+
+    combined.save("/tmp/screenshotter/output.pnm").unwrap();
+
     Ok(())
 }
 
@@ -125,17 +155,22 @@ async fn region() -> Result<()> {
     trace!("Starting region");
     LazyLock::force(&CONFIG);
 
+    init_threadpool();
+
     let mut con = Conn::init(Mode::Region)?;
     let mut finder = target::ApplicationFinder::init();
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
-    let selection = con.select(windows).await?;
+    let selection = con.run(windows).await?;
     debug!("Selected region {:?}", selection.int_region());
     let app = finder.application_for_spawned(selection.clone());
 
-    con.take_screenshot();
+    let screenshots = con.take_screenshot()?;
 
-    println!("{:?}", app.await);
+    let combined = img::combine(screenshots, true);
+
+    combined.save("/tmp/screenshotter/output.pnm").unwrap();
+    let app = app.await?;
 
     Ok(())
 }
@@ -150,7 +185,7 @@ async fn name() -> Result<()> {
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
 
-    let selection = con.select(windows).await?;
+    let selection = con.run(windows).await?;
     let Selected::Window(window) = selection else {
         bail!("No window selected");
     };
@@ -160,6 +195,8 @@ async fn name() -> Result<()> {
 
     let target = app.relative_dir.to_string_lossy();
 
+    println!("{target}");
+
     Notification::new()
         .summary("application name")
         .appname("screenshotter")
@@ -167,7 +204,6 @@ async fn name() -> Result<()> {
         .urgency(Urgency::Low)
         .show()?;
 
-    println!("{target}");
 
     Ok(())
 }
@@ -178,7 +214,7 @@ async fn prop() -> Result<()> {
     let mut con = Conn::init(Mode::PickWindow)?;
     let windows = while_polling(ipc::visible_windows(), &mut con).await?;
 
-    let selection = con.select(windows).await?;
+    let selection = con.run(windows).await?;
     if let Selected::Window(w) = selection {
         w.dump();
     }
@@ -195,6 +231,14 @@ async fn visible() -> Result<()> {
     println!("{json}");
 
     Ok(())
+}
+
+// Only spin this up if we might need it. Only used for scaling
+fn init_threadpool() {
+    ThreadPoolBuilder::new()
+        .num_threads(available_parallelism().map_or(4, |p| p.get() / 2))
+        .build_global()
+        .unwrap();
 }
 
 // If we need to do more than this, it'd be better to spawn() and use channels
@@ -216,7 +260,7 @@ impl Command {
     const fn str(&self) -> &'static str {
         match self {
             Self::Window => "window",
-            Self::Desktop => "desktop",
+            Self::Desktop { .. } => "desktop",
             Self::Region => "region",
             Self::Name => "name",
             Self::Prop => "prop",

@@ -41,8 +41,8 @@ pub struct LFRegion {
     pub height: f64,
 }
 
-// A region in global logical pixels
-// TODO -- consider dropping this for LFReion everywhere
+// A region in global logical pixels.
+// Only comes into the application from the IPC interface.
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize, Default)]
 pub struct LRegion {
     pub x: i32,
@@ -79,6 +79,11 @@ pub struct ORegion {
 }
 
 impl Monitor {
+    // Scale as a fixed point with denominator 120
+    pub fn fixed_scale(&self) -> u32 {
+        (self.scale * 120.).round() as u32
+    }
+
     pub fn global_pixel_bounds(&self, point: MLPoint) -> LFRegion {
         // top left to bottom right of the containing pixel
         let x = (point.x * self.scale).floor() / self.scale + self.logical.x as f64;
@@ -131,31 +136,30 @@ impl Monitor {
             }
         })
     }
-
-    pub fn intersect(&self, other: &LRegion) -> Option<MRegion> {
-        self.logical.intersect(other).and_then(|r| {
-            // TODO -- ensure this can't
-            let left = ((r.x - self.logical.x) as f64 * self.scale).floor() as _;
-            let top = ((r.y - self.logical.y) as f64 * self.scale).floor() as _;
-            let right = ((r.x - self.logical.x + r.width) as f64 * self.scale).ceil() as i32;
-            let bottom = ((r.y - self.logical.y + r.height) as f64 * self.scale).ceil() as i32;
-
-            let width = right - left;
-            let height = bottom - top;
-
-            if left < 0 || right > self.physical.width || top < 0 || bottom > self.physical.height {
-                error!("Bad intersection {self:?}, {left},{top} {width}x{height}");
-                None
-            } else {
-                Some(MRegion { x: left, y: top, width, height })
-            }
-        })
-    }
 }
 
 impl LFRegion {
     pub const fn upper_left(&self) -> LPoint {
         LPoint { x: self.x, y: self.y }
+    }
+
+    pub const fn output_region(&self, scale: u32) -> ORegion {
+        let x = ((self.x * scale as f64 + 60.) / 120.).trunc() as i32;
+        let y = ((self.y * scale as f64 + 60.) / 120.).trunc() as i32;
+        let width = ((self.width * scale as f64 + 60.) / 120.).trunc() as i32;
+        let height = ((self.height * scale as f64 + 60.) / 120.).trunc() as i32;
+        ORegion { x, y, width, height }
+    }
+
+    pub const fn output_region_unscaled(&self, scale: u32, dimensions: (u32, u32)) -> ORegion {
+        let x = ((self.x * 120. + 60.) / 120.).trunc() as i32;
+        let y = ((self.y * 120. + 60.) / 120.).trunc() as i32;
+        ORegion {
+            x,
+            y,
+            width: dimensions.0 as _,
+            height: dimensions.1 as _,
+        }
     }
 
     pub fn intersect(self, other: &Self) -> Option<Self> {
@@ -174,17 +178,6 @@ impl LFRegion {
             None
         }
     }
-
-    // Given precise points on two monitors, find a logical bounding region that definitely
-    // contains both points.
-    // pub fn bounding_region(
-    //     a: MLPoint,
-    //     b: MLPoint,
-    //     monitor_a: &Monitor,
-    //     monitor_b: &Monitor,
-    // ) -> Self {
-    // monitor_a.local_to_global(a).bounding_region(&monitor_b.local_to_global(b))
-    // }
 
     pub fn bounding_region(&self, other: &Self) -> Self {
         let left = f64::min(self.x, other.x);
@@ -228,11 +221,20 @@ impl LRegion {
             && (self.y + self.height) as f64 > point.y
     }
 
+    // We couldn't find a perfect match, so add a 0.5px margin
+    // Don't do this first in case it would cause overlaps.
+    pub const fn contains_lenient(&self, point: LPoint) -> bool {
+        self.x as f64 <= point.x + 0.5
+            && (self.x + self.width) as f64 > point.x - 0.5
+            && self.y as f64 <= point.y + 0.5
+            && (self.y + self.height) as f64 > point.y - 0.5
+    }
+
     pub const fn valid_mouse(&self, point: MLPoint) -> bool {
         point.x >= 0.0
             && point.x < self.width as f64
             && point.y >= 0.0
-            && point.y <= self.height as f64
+            && point.y < self.height as f64
     }
 
     // Returns a non-empty intersection
@@ -275,7 +277,6 @@ impl MRegion {
     }
 
     pub fn contains(&self, MLPoint { x, y }: MLPoint) -> bool {
-        println!("{self:?}, {x},{y}");
         self.x as f64 <= x && self.width as f64 > x && self.y as f64 <= y && self.height as f64 > y
     }
 }
@@ -295,6 +296,39 @@ impl LPoint {
             y: top,
             width: right - left + 1.0,
             height: bottom - top + 1.0,
+        }
+    }
+}
+
+pub enum Overlap {
+    Nothing,
+    X(i32),
+    Y(i32),
+}
+
+impl ORegion {
+    // Greedy, prioritize the smallest movement
+    pub fn overlap(&self, other: &Self) -> Overlap {
+        let left = max(self.x, other.x);
+        let right = min(self.x + self.width, other.x + other.width);
+        let top = max(self.y, other.y);
+        let bottom = min(self.y + self.height, other.y + other.height);
+
+        if right > left && bottom > top {
+            let x = if self.x <= other.x {
+                self.x + self.width - other.x
+            } else {
+                other.x + other.width - self.x
+            };
+
+            let y = if self.y <= other.y {
+                self.y + self.height - other.y
+            } else {
+                other.y + other.height - self.y
+            };
+            if x <= y { Overlap::X(x) } else { Overlap::Y(y) }
+        } else {
+            Overlap::Nothing
         }
     }
 }

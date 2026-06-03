@@ -70,6 +70,10 @@ impl ApplicationFinder {
         Self { system: Some(system) }
     }
 
+    pub const fn empty() -> Self {
+        Self { system: None }
+    }
+
     // Can't meaningfully avoid spinning up another thread here, but if spawn_blocking with a
     // single threaded executor ensures there are no entirely wasted threads.
     pub fn application_for_spawned(
@@ -113,6 +117,7 @@ impl ApplicationFinder {
             };
 
             env.insert(WINDOW_PID, pid.to_string().into());
+            // system should always be available if the selection includes a window
             let system = self.system.take().unwrap().await?;
             let (name, cmd, pid) = get_process(system, name, pid as u32);
             cli = cmd;

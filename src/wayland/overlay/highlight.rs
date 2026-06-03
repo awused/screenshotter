@@ -1,25 +1,27 @@
 use core::slice;
 use std::cmp::{max, min};
+use std::time::Instant;
 
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use wayland_client::Dispatch;
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 
 use crate::util::MRegion;
-use crate::wayland::protos::Buffer;
+use crate::wayland::buffer::Buffer;
 use crate::wayland::{OutputKey, State};
 
 #[derive(Debug, Clone, Copy)]
-pub struct DrawingKey(pub OutputKey, pub usize);
+pub struct HighlightKey(pub OutputKey, pub usize);
 
 #[derive(Debug)]
-pub struct Drawing {
+pub struct Highlight {
     pub buffer: Buffer,
     // Could use a dedicated None buffer for better reuse
     pub drawn: Option<MRegion>,
     pub locked: bool,
 }
 
-impl Drawing {
+impl Highlight {
     // Region is in buffer coordinates
     pub fn draw(&mut self, region: Option<MRegion>) -> bool {
         if region == self.drawn {
@@ -27,7 +29,7 @@ impl Drawing {
         }
 
         if self.locked {
-            warn!("Tried to write to locked buffer, handle deferring the drawing");
+            error!("Tried to write to locked buffer, should not happen");
             return false;
         }
         self.locked = true;
@@ -35,7 +37,7 @@ impl Drawing {
         // For now just be lazy and only handle 32bit pixels
         assert!(self.buffer.format.size() == 4);
 
-        // TODO -- formats -- this assumes Argb8888
+        // TODO[HDR] -- this assumes Argb8888
         if let Some(drawn) = &self.drawn.take() {
             // Could skip this if drawn fits inside the new region
             unsafe {
@@ -53,6 +55,7 @@ impl Drawing {
             }
             self.drawn = Some(drawn);
         }
+
 
         true
     }
@@ -74,13 +77,17 @@ impl Drawing {
 
                 slice::from_raw_parts_mut(start, len).fill(fill);
             } else {
-                for y in region.y as usize..(region.y + region.height) as usize {
-                    let start = region.x as usize + y * stride;
-                    assert!(start + (region.width as usize) <= max_size);
-                    let start = raw.add(start);
-                    assert!(start.is_aligned());
-                    slice::from_raw_parts_mut(start, region.width as _).fill(fill)
-                }
+                let buf = slice::from_raw_parts_mut(raw, max_size);
+                // Doing this from multiple threads with par_bridge() is just barely faster by
+                // enough to be even a little bit useful.
+                buf.chunks_exact_mut(stride)
+                    .enumerate()
+                    .skip(region.y as _)
+                    .take(region.height as _)
+                    .par_bridge()
+                    .for_each(|(y, row)| {
+                        row[region.x as usize..(region.x + region.width) as usize].fill(fill);
+                    });
             }
         }
 
@@ -126,7 +133,7 @@ impl Drawing {
     }
 }
 
-impl Dispatch<WlBuffer, State> for DrawingKey {
+impl Dispatch<WlBuffer, State> for HighlightKey {
     fn event(
         &self,
         state: &mut State,
@@ -139,7 +146,7 @@ impl Dispatch<WlBuffer, State> for DrawingKey {
             return;
         }
 
-        state.outputs.get_mut(&self.0).unwrap().overlay.get_mut().unwrap().drawings[self.1]
+        state.outputs.get_mut(&self.0).unwrap().overlay.get_mut().unwrap().highlights[self.1]
             .locked = false;
     }
 }

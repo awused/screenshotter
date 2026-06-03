@@ -19,12 +19,13 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
 };
 
 use crate::util::{MLPoint, MRegion, Monitor};
+use crate::wayland::buffer::Buffer;
 use crate::wayland::magnifier::Magnifier;
-use crate::wayland::overlay::drawing::{Drawing, DrawingKey};
-use crate::wayland::protos::{Buffer, Protos};
+use crate::wayland::overlay::highlight::{Highlight, HighlightKey};
+use crate::wayland::protos::Protos;
 use crate::wayland::{Format, MouseState, OutputKey, State, Transform};
 
-mod drawing;
+mod highlight;
 
 #[derive(Debug)]
 struct OverlayKey(OutputKey);
@@ -50,8 +51,8 @@ pub struct Overlay {
 
     transparent_format: Format,
     // Can be large, only gets initialized if needed
-    drawings: Vec<Drawing>,
-    last_drawing: (usize, Option<MRegion>),
+    highlights: Vec<Highlight>,
+    last_highlight: (usize, Option<MRegion>),
 
     pub magnifier: OnceCell<Magnifier>,
 
@@ -97,7 +98,7 @@ impl Overlay {
     }
 
     pub fn draw_box(&mut self, qhandle: &QueueHandle<State>, rect: Option<MRegion>) -> Result<()> {
-        if (rect.is_none() && self.drawings.is_empty()) || self.last_drawing.1 == rect {
+        if (rect.is_none() && self.highlights.is_empty()) || self.last_highlight.1 == rect {
             return Ok(());
         }
 
@@ -110,35 +111,41 @@ impl Overlay {
         let (w, h) = self.initialized_res().unwrap();
 
         // Even if it has the same rectangle drawn, we need to find one that's unlocked
-        let (index, drawing) = if let Some(drawing) =
-            self.drawings.iter_mut().enumerate().find(|(_, d)| !d.locked && d.drawn == rect)
+        let (index, high) = if let Some(high) = self
+            .highlights
+            .iter_mut()
+            .enumerate()
+            .find(|(_, d)| !d.locked && d.drawn == rect)
         {
-            drawing
-        } else if let Some(drawing) = self.drawings.iter_mut().enumerate().find(|(_, d)| !d.locked)
-        {
-            drawing
+            high
+        } else if let Some(high) = self.highlights.iter_mut().enumerate().find(|(_, d)| !d.locked) {
+            high
         } else {
-            let index = self.drawings.len();
+            let index = self.highlights.len();
             if index > 3 {
-                bail!("Too many drawings, they're not being unlocked");
+                bail!("Too many highlight buffers, they're not being unlocked");
             }
-            debug!("Creating drawing {index} for {:?}", self.output);
+            debug!("Creating highlight buffer {index} for {:?}", self.output);
 
-            let buffer = self.protos.create_buffer(
+            let buffer = Buffer::new(
+                &self.protos,
                 qhandle,
                 self.transparent_format,
                 w,
                 h,
-                DrawingKey(self.output, index),
+                HighlightKey(self.output, index),
             )?;
-            (index, self.drawings.push_mut(Drawing { buffer, drawn: None, locked: false }))
+            (
+                index,
+                self.highlights.push_mut(Highlight { buffer, drawn: None, locked: false }),
+            )
         };
 
-        // TODO - it'd be faster to keep and reuse a single fully transparent buffer for when
+        // TODO - it'd be faster to keep and reuse a single tiny transparent buffer for when
         // nothing is visible
-        if drawing.draw(rect) || index != self.last_drawing.0 {
+        if high.draw(rect) || index != self.last_highlight.0 {
             // Could be smarter here, likely does not matter.
-            self.overlay_surface.attach(Some(&drawing.buffer.wl_buffer), 0, 0);
+            self.overlay_surface.attach(Some(&high.buffer.wl_buffer), 0, 0);
             self.overlay_surface.damage(0, 0, w, h);
             // For sway the viewport resets
             let unscaled = self.unscaled.get().unwrap();
@@ -149,7 +156,7 @@ impl Overlay {
             self.overlay_surface.commit();
             self.freeze_surface.commit();
         }
-        self.last_drawing = (index, rect);
+        self.last_highlight = (index, rect);
 
         Ok(())
     }
@@ -221,8 +228,8 @@ impl Overlay {
             pending_region: None,
 
             transparent_format,
-            drawings: Vec::new(),
-            last_drawing: Default::default(),
+            highlights: Vec::new(),
+            last_highlight: Default::default(),
 
             magnifier: OnceCell::default(),
             unscaled: OnceCell::default(),
@@ -294,7 +301,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, State> for OutputKey {
                     proxy.ack_configure(serial);
 
                     if overlay.scale.get().is_none() {
-                        let dummy = state.protos.create_buffer(
+                        let dummy = Buffer::new(
+                            &state.protos,
                             qh,
                             state.transparent_format(),
                             1 as _,

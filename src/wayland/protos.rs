@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use color_eyre::Result;
 use color_eyre::eyre::{OptionExt, bail};
-use image::{DynamicImage, RgbImage, RgbaImage};
+use image::{DynamicImage, Rgb, RgbImage, RgbaImage};
 use libc::{MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE, close, ftruncate, shm_open, shm_unlink};
 use nix::errno::Errno;
 use wayland_client::{Dispatch, NoopIgnore};
@@ -18,60 +18,14 @@ use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_c
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::pointer_warp::v1::client::wp_pointer_warp_v1::WpPointerWarpV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
 use crate::util::MRegion;
+use crate::wayland::buffer::Buffer;
 use crate::wayland::{Format, State};
-
-#[derive(Debug)]
-pub struct Buffer {
-    pub wl_buffer: WlBuffer,
-    pub buf: *mut c_void,
-    pub fd: RawFd,
-    pub format: Format,
-    // These are untransformed
-    pub width: usize,
-    pub height: usize,
-    // Buffer size in bytes
-    pub buf_size: usize,
-}
-
-// It's safe to read the buffer from another thread, but not if it's being written to on the
-// wayland end.
-//unsafe impl Sync for Buffer {}
-
-impl Buffer {
-    // Only handle 8 bit formats for now
-    // SAFETY: Buffer needs to be in a good state
-    pub unsafe fn read(&self) -> Result<DynamicImage> {
-        let size = self.width * self.height * self.format.size();
-        let mut out = vec![0u8; size];
-
-        assert!(size <= self.buf_size, "Image buffer larger than capture buffer");
-        unsafe {
-            self.buf.copy_to_nonoverlapping(out.as_mut_ptr().cast(), size);
-        }
-
-        match self.format {
-            Format::Argb8888 => {
-                out.chunks_exact_mut(4).for_each(|c| c.swap(0, 2));
-                Ok(DynamicImage::ImageRgba8(
-                    RgbaImage::from_raw(self.width as _, self.height as _, out)
-                        .ok_or_eyre("Can't construct image")?,
-                ))
-            }
-            Format::Bgr888 => {
-                // TODO -- test if needs swizzling
-                Ok(DynamicImage::ImageRgb8(
-                    RgbImage::from_raw(self.width as _, self.height as _, out)
-                        .ok_or_eyre("Can't construct image")?,
-                ))
-            }
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 pub struct Protos {
@@ -85,77 +39,7 @@ pub struct Protos {
     pub image_copy: OnceCell<ExtImageCopyCaptureManagerV1>,
     pub xdg_output: OnceCell<ZxdgOutputManagerV1>,
     pub shape_manager: OnceCell<WpCursorShapeManagerV1>,
-}
-
-static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-impl Protos {
-    pub fn create_buffer(
-        &self,
-        qhandle: &wayland_client::QueueHandle<State>,
-        format: Format,
-        width: i32,
-        height: i32,
-        udata: impl Dispatch<WlBuffer, State> + Send + Sync + 'static,
-    ) -> Result<Buffer> {
-        // If this runs into problems, we'll need rng
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let name = CString::new(format!("screenshotter-{}-{}", process::id(), id)).unwrap();
-
-        let stride = width.checked_mul(format.size() as i32).ok_or_eyre("Buffer too large")?;
-        let size = height.checked_mul(stride).ok_or_eyre("Buffer too large")?;
-
-        let fd = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
-        if fd < 0 {
-            bail!("Unable to open shared memory: {fd}");
-        }
-
-        let buf = unsafe {
-            shm_unlink(name.as_ptr());
-
-            let mut ret = 1;
-            for _ in 0..100 {
-                ret = ftruncate(fd, size as i64);
-                if ret == 0 || Errno::last() != Errno::EINTR {
-                    break;
-                }
-            }
-            if ret < 0 {
-                close(fd);
-                bail!("Failed to extend file descriptor to {}: {}", size, ret);
-            }
-
-            libc::mmap(std::ptr::null_mut(), size as _, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
-        };
-
-        let pool = self.shm().create_pool(
-            unsafe { BorrowedFd::borrow_raw(fd) },
-            size as _,
-            qhandle,
-            NoopIgnore,
-        );
-
-        let wl_buffer = pool.create_buffer(
-            0,
-            width as _,
-            height as _,
-            stride,
-            format.wl_format(),
-            qhandle,
-            udata,
-        );
-        pool.destroy();
-
-        Ok(Buffer {
-            wl_buffer,
-            buf,
-            fd: fd as _,
-            format,
-            width: width as _,
-            height: height as _,
-            buf_size: size as _,
-        })
-    }
+    pub pointer_warp: OnceCell<WpPointerWarpV1>,
 }
 
 macro_rules! proto_get {
@@ -178,13 +62,3 @@ proto_get!(output_capture, ExtOutputImageCaptureSourceManagerV1);
 proto_get!(image_copy, ExtImageCopyCaptureManagerV1);
 proto_get!(xdg_output, ZxdgOutputManagerV1);
 proto_get!(shape_manager, WpCursorShapeManagerV1);
-
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        unsafe {
-            close(self.fd);
-            libc::munmap(self.buf.cast(), self.buf_size);
-            self.wl_buffer.destroy();
-        }
-    }
-}

@@ -14,7 +14,8 @@ use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
 use crate::util::{MLPoint, MRegion, Monitor};
-use crate::wayland::protos::{Buffer, Protos};
+use crate::wayland::buffer::Buffer;
+use crate::wayland::protos::Protos;
 use crate::wayland::{OutputKey, State, Transform};
 
 // Must be odd
@@ -33,7 +34,6 @@ struct View {
     origin: (i32, i32),
 }
 
-// TODO -- properly make this nearest-neighbour
 #[derive(Debug)]
 pub struct Magnifier {
     protos: Rc<Protos>,
@@ -101,7 +101,8 @@ impl Magnifier {
             }
             debug!("Creating magnifier {index} for {:?}", self.output);
 
-            let buffer = self.protos.create_buffer(
+            let buffer = Buffer::new(
+                &self.protos,
                 qh,
                 self.frozen.format,
                 LARGE_RES as _,
@@ -116,13 +117,9 @@ impl Magnifier {
             view.origin = origin;
             // SAFETY: we checked it was unlocked or newly created it
             unsafe {
-                view.draw(&self.frozen, self.monitor.transform);
+                view.draw(&self.frozen, &self.monitor);
             }
-            // draw
         }
-
-        // println!("{:?} {point:?} {origin:?}", self.monitor);
-
 
         if self.last_view.is_none() {
             self.crosshair_surface.attach(Some(&self.cross.wl_buffer), 0, 0);
@@ -156,11 +153,6 @@ impl Magnifier {
         if pos_y < 0 {
             pos_y = log_y + PADDING;
         }
-
-
-        // TODO -- investigate more
-        // seems like the right position, but it glitches out outside of the untransformed bounds
-        // Compositor bug?
 
         self.zoom_subsurface.set_position(pos_x, pos_y);
         self.crosshair_subsurface.set_position(pos_x, pos_y);
@@ -228,7 +220,7 @@ impl Magnifier {
 
 impl View {
     // Cannot be run between commit() and the release
-    unsafe fn draw(&mut self, frozen: &Buffer, transform: Transform) {
+    unsafe fn draw(&mut self, frozen: &Buffer, monitor: &Monitor) {
         let bytes = frozen.format.size();
         let frozen_stride = bytes * frozen.width;
         let stride = bytes * self.buffer.width;
@@ -241,8 +233,10 @@ impl View {
                 for x in 0..RES as i32 {
                     let true_x = x - inset + self.origin.0;
                     let true_y = y - inset + self.origin.1;
-                    let (true_x, true_y) =
-                        transform.correct((true_x, true_y), (frozen.width, frozen.height));
+                    let (true_x, true_y) = monitor.transform.correct(
+                        (true_x, true_y),
+                        (monitor.physical.width, monitor.physical.height),
+                    );
 
                     let pixel = if true_x >= 0
                         && (true_x as usize) < frozen.width
@@ -276,17 +270,13 @@ impl View {
 pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buffer> {
     let format = state.transparent_format();
     let buffer =
-        state
-            .protos
-            .create_buffer(qhandle, format, LARGE_RES as _, LARGE_RES as _, NoopIgnore)?;
+        Buffer::new(&state.protos, qhandle, format, LARGE_RES as _, LARGE_RES as _, NoopIgnore)?;
 
     let stride = format.size() * LARGE_RES;
     let size = stride * LARGE_RES;
 
-    // TODO -- only support u8 for now, eventually we want to consider HDR10 where transparency
-    // doesn't matter as much?
+    // TODO -- support non-argb8888 formats. HDR10 has minimal transparency
     let mut drawing = vec![0u8; size];
-    // TODO -- support non-argb8888 formats
     let pixel = [178, 178, 0, 178];
     assert_eq!(pixel.len(), format.size());
 

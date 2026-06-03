@@ -2,8 +2,12 @@ use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::mem::swap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use color_eyre::eyre::{bail, eyre};
+use image::{DynamicImage, RgbImage};
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use wayland_client::{Dispatch, NoopIgnore};
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::{
     self, ExtImageCopyCaptureFrameV1,
@@ -12,7 +16,8 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
     self, ExtImageCopyCaptureSessionV1,
 };
 
-use crate::wayland::protos::Buffer;
+use crate::util::{MRegion, Monitor};
+use crate::wayland::buffer::Buffer;
 use crate::wayland::{Format, OutputKey, State, Transform};
 
 #[derive(Debug, Default)]
@@ -24,13 +29,16 @@ pub struct Capture {
     pub shm_formats: BTreeSet<Format>,
     frame: OnceCell<ExtImageCopyCaptureFrameV1>,
 
-    // TODO -- test transforms or remove
     pub transform: Transform,
 
     pub buffer: OnceCell<Rc<Buffer>>,
 
     pub done: bool,
 }
+
+// TODO -- remove, this is for testing
+static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
+
 
 impl Capture {
     pub fn transformed_res(&self) -> Option<(i32, i32)> {
@@ -40,6 +48,62 @@ impl Capture {
             return Some((res.1, res.0));
         }
         Some(res)
+    }
+
+    pub fn take_screenshot(&self, monitor: &Monitor, region: MRegion) -> RgbImage {
+        assert!(self.done);
+
+        let buffer = &**self.buffer.get().unwrap();
+        let transform = self.transform;
+
+        let start = Instant::now();
+        let mut out = RgbImage::new(region.width as _, region.height as _);
+
+
+        if transform.normal() {
+            let mut buf = out.into_vec();
+            buf.chunks_exact_mut(region.width as usize * 3)
+                .enumerate()
+                .par_bridge()
+                .for_each(|(y, row)| {
+                    let x = region.x;
+                    let y = region.y + y as i32;
+
+                    // SAFETY: This buffer is never attached to a surface, so it is safe to read
+                    // after the capture is done.
+                    unsafe {
+                        buffer.read_normal_row(x, y, row);
+                    }
+                });
+
+            out = RgbImage::from_vec(region.width as _, region.height as _, buf).unwrap()
+        } else {
+            // This is appreciably faster in parallel, to the point where it's almost not necessary
+            // to have a fast path.
+
+            let mut width = monitor.physical.width;
+            let mut height = monitor.physical.height;
+
+            out.rows_mut().enumerate().par_bridge().for_each(|(y, row)| {
+                row.enumerate().for_each(|(x, p)| {
+                    let x = region.x + x as i32;
+                    let y = region.y + y as i32;
+
+                    let (x, y) = transform.correct((x, y), (width, height));
+
+                    // SAFETY: This buffer is never attached to a surface, so it is safe to read
+                    // after the capture is done.
+                    *p = unsafe { buffer.read_rgb(x, y) }
+                });
+            });
+        }
+
+        debug!("Read {}x{} image in {:?}", region.width, region.height, start.elapsed());
+
+        out.save(format!("/tmp/screenshotter/{}.pnm", NEXT_FILE.fetch_add(1, Ordering::Relaxed)))
+            .unwrap();
+
+        out
     }
 }
 
@@ -99,7 +163,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, State> for OutputKey {
                     let (width, height) = *capture.res.get().unwrap();
 
                     let buffer =
-                        state.protos.create_buffer(qhandle, format, width, height, NoopIgnore)?;
+                        Buffer::new(&state.protos, qhandle, format, width, height, NoopIgnore)?;
                     frame.attach_buffer(&buffer.wl_buffer);
                     frame.damage_buffer(0, 0, width as _, height as _);
                     frame.capture();
@@ -150,10 +214,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, State> for OutputKey {
                         bail!("Got second ready for {self:?}, {output:?})");
                     }
                     capture.done = true;
-                    // Just got a Ready event, we can read
-                    // let image = unsafe { capture.buffer.get().unwrap().read()? };
 
-                    // image.save(format!("/tmp/screenshotter/{}.pnm", self.0))?;
                     capture.session.take().unwrap().destroy();
                     capture.frame.take().unwrap().destroy();
 

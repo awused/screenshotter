@@ -1,6 +1,7 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use color_eyre::eyre::{bail, eyre};
@@ -23,9 +24,10 @@ use crate::CLICK_TIME_MS;
 use crate::img::Screenshot;
 use crate::ipc::Window;
 use crate::util::{LFRegion, LRegion, MLPoint, MRegion};
+use crate::wayland::buffer::Buffer;
 use crate::wayland::magnifier::Magnifier;
 use crate::wayland::output::Output;
-use crate::wayland::protos::{Buffer, Protos};
+use crate::wayland::protos::Protos;
 
 // Slightly nicer than state.try_handle but doesn't get formatted
 // macro_rules! try_handle {
@@ -42,6 +44,7 @@ use crate::wayland::protos::{Buffer, Protos};
 
 struct Global;
 
+mod buffer;
 mod capture;
 pub mod conn;
 mod magnifier;
@@ -93,6 +96,7 @@ pub enum Mode {
     ScreenshotOnly,
     Region,
     PickWindow,
+    // Window(Window)
 }
 
 impl Mode {
@@ -177,6 +181,7 @@ struct State {
 
     protos: Rc<Protos>,
 
+    pointer: OnceCell<WlPointer>,
     mouse: MouseState,
     keystate: Option<XkbState>,
     select_state: SelectState,
@@ -244,7 +249,8 @@ impl State {
         if !self.mode.shot() {
             // Always attach a dummy so we can map the freeze layer even if we never render
             // anything
-            let dummy = self.protos.create_buffer(
+            let dummy = Buffer::new(
+                &self.protos,
                 qh,
                 self.transparent_format(),
                 1 as _,
@@ -258,7 +264,6 @@ impl State {
 
         debug!("Freezing output");
 
-        // TODO -- this might be okay if there are transforms to apply
         if res != capture.transformed_res().unwrap() {
             bail!(
                 "Got different capture and output resolutions. output: {res:?}, capture {:?}",
@@ -347,10 +352,20 @@ impl State {
             let global = output.monitor.local_to_global(point);
 
             // Just iterating is plenty fast
-            let Some((k, o)) =
-                self.outputs.iter().find(|(k, v)| v.monitor.logical.contains(global))
+            let Some((k, o)) = self
+                .outputs
+                .iter()
+                .find(|(k, v)| v.monitor.logical.contains(global))
+                .or_else(|| {
+                    // Dragging mouse events can be just barely off-screen.
+                    // Could snap these into the region, but that actually seems undesirable.
+                    self.outputs.iter().find(|(k, v)| v.monitor.logical.contains_lenient(global))
+                })
             else {
-                warn!("Got bad mouse event and could not tie it to a monitor");
+                warn!(
+                    "Got bad mouse event and could not tie it to a monitor: {:?} on {:?}",
+                    self.mouse.point, target
+                );
                 return;
             };
             target = *k;
@@ -368,8 +383,6 @@ impl State {
                 .hide_magnifier();
             *corrected = target;
         }
-
-        // Repair broken events during dragging
 
         if let Err(e) = self
             .outputs
@@ -478,8 +491,6 @@ impl State {
                 (SelectState::OverWindow(i), Mode::PickWindow) => {
                     debug!("Mouse down on window, selecting");
                     self.status = Status::Done(Selected::Window(self.windows.swap_remove(*i)));
-
-                    // self.final_selection = FinalSelection::Window(self.windows.swap_remove(*i));
                     return;
                 }
                 (SelectState::Hovering, Mode::Region) => None,
@@ -530,7 +541,7 @@ impl State {
         }
     }
 
-    fn handle_key(&self, key: u32) -> Result<()> {
+    fn handle_key(&self, serial: u32, key: u32) -> Result<()> {
         let Some(ref keystate) = self.keystate else {
             warn!("Got key press with no keymap, treating as escape");
             bail!("Cancelled");
@@ -538,12 +549,28 @@ impl State {
 
         let key = keystate.key_get_one_sym(Keycode::new(key + 8));
 
+        debug!("Keysym: {key:?}");
         match key {
             Keysym::Escape | Keysym::Q | Keysym::q => {
                 bail!("Cancelled");
             }
-            _ => Ok(()),
+            // Keysym::Up => {
+            // TODO -- implement warping in all four directions and enter as click
+            // maybe even key repeats (seems a bit annoying to do)?
+            // if let Some(warp) = self.protos.pointer_warp.get() {
+            //     warp.warp_pointer(
+            //         &self.mouse.hover.as_ref().unwrap().entered,
+            //         self.pointer.get().unwrap(),
+            //         -1.0,
+            //         -1.0,
+            //         serial,
+            //     );
+            // };
+            // }
+            _ => {}
         }
+
+        Ok(())
     }
 
     #[instrument(level = "error", skip_all)]
@@ -553,7 +580,12 @@ impl State {
         };
 
         let region = match selected {
-            Selected::Nothing => todo!("desktop"),
+            Selected::Nothing => LFRegion {
+                x: f64::MIN,
+                y: f64::MIN,
+                width: f64::INFINITY,
+                height: f64::INFINITY,
+            },
             Selected::Region(lfregion) | Selected::RegionWindow(lfregion, _) => lfregion,
             Selected::Window(window) => window.region().into(),
         };
@@ -563,9 +595,12 @@ impl State {
             .into_values()
             .filter_map(|o| o.monitor.intersect_rounded(&region).map(|(l, r)| (o, l, r)))
             .map(|(o, logical, r)| {
-                // let image = o.take_screenshot(r);
-                // Screenshot { image, logical, scale: o.monitor.scale }
-                todo!()
+                let image = o.capture.take_screenshot(&o.monitor, r);
+                Screenshot {
+                    image,
+                    logical,
+                    int_scale: o.monitor.fixed_scale(),
+                }
             })
             .collect();
 
@@ -573,9 +608,15 @@ impl State {
             bail!("Nothing to screenshot, this shouldn't happen.");
         }
 
-        info!("Found regions to screenshot on {} monitors", segments.len());
+        info!("Captured regions on {} monitors", segments.len());
+        debug!(
+            "Regions: {:?}",
+            segments
+                .iter()
+                .map(|s| (s.logical, s.image.dimensions(), s.int_scale))
+                .collect::<Vec<_>>()
+        );
 
-        error!("{}", segments.len());
         Ok(segments)
     }
 }
@@ -616,32 +657,42 @@ impl Format {
     }
 }
 
+static WEIRD_TRANSFORMS: AtomicBool = AtomicBool::new(false);
+
 impl Transform {
     const fn rotate(self) -> bool {
         !self.0.0.is_multiple_of(2)
     }
 
-    // TODO -- this is inconsistent between hyprland and sway, needs work.
-    const fn freeze_transform(self) -> wl_output::Transform {
-        match self.0.0 {
-            1 => wl_output::Transform::_270,
-            3 => wl_output::Transform::_90,
-            _ => self.0,
+    fn freeze_transform(self) -> wl_output::Transform {
+        if WEIRD_TRANSFORMS.load(Ordering::Relaxed) {
+            match self.0.0 {
+                1 => wl_output::Transform::_270,
+                3 => wl_output::Transform::_90,
+                _ => self.0,
+            }
+        } else {
+            self.0
         }
     }
 
-    // TODO -- inconsistent between hyprland and sway?
-    const fn correct(self, (x, y): (i32, i32), (width, height): (usize, usize)) -> (i32, i32) {
+    // (width, height) are physical as displayed to the user.
+    // a 1440p monitor with a rotation applied would be (1440, 2560)
+    const fn correct(self, (x, y): (i32, i32), (width, height): (i32, i32)) -> (i32, i32) {
         match self.0.0 {
-            1 => (y, height as i32 - x - 1),
+            1 => (y, width as i32 - x - 1),
             2 => (width as i32 - x - 1, height as i32 - y - 1),
-            3 => (width as i32 - y - 1, x),
+            3 => (height as i32 - y - 1, x),
             4 => (width as i32 - x - 1, y),
             5 => (y, x),
             6 => (x, height as i32 - y - 1),
-            7 => (width as i32 - y - 1, height as i32 - x - 1),
+            7 => (height as i32 - y - 1, width as i32 - x - 1),
             _ => (x, y),
         }
+    }
+
+    const fn normal(self) -> bool {
+        self.0.0 == 0
     }
 }
 
