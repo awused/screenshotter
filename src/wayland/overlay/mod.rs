@@ -1,6 +1,5 @@
 use std::cell::OnceCell;
 use std::rc::Rc;
-use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::{bail, eyre};
@@ -18,12 +17,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
 };
 
-use crate::util::{MLPoint, MRegion, Monitor};
+use crate::util::{MLPoint, MRegion};
 use crate::wayland::buffer::Buffer;
 use crate::wayland::magnifier::Magnifier;
 use crate::wayland::overlay::highlight::{Highlight, HighlightKey};
 use crate::wayland::protos::Protos;
-use crate::wayland::{Format, MouseState, OutputKey, State, Transform};
+use crate::wayland::{Format, OutputKey, State, Transform};
 
 mod highlight;
 
@@ -291,7 +290,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, State> for OutputKey {
                 Event::Configure { serial, width, height } => {
                     let overlay = output.overlay.get().unwrap();
                     if let Some((w, h)) = overlay.unscaled.get() {
-                        if ((w, h) != (&width, &height)) {
+                        if (w, h) != (&width, &height) {
                             bail!("Got second configure for {self:?}")
                         }
                         return Ok(());
@@ -331,7 +330,7 @@ impl Dispatch<WlSurface, State> for OutputKey {
         _proxy: &WlSurface,
         event: <WlSurface as wayland_client::Proxy>::Event,
         _conn: &wayland_client::Connection,
-        qh: &wayland_client::QueueHandle<State>,
+        _qh: &wayland_client::QueueHandle<State>,
     ) {
         use wl_surface::Event;
 
@@ -358,9 +357,9 @@ impl Dispatch<WlCallback, State> for OverlayKey {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlCallback,
-        event: <WlCallback as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
+        _proxy: &WlCallback,
+        _event: <WlCallback as wayland_client::Proxy>::Event,
+        _conn: &wayland_client::Connection,
         qhandle: &QueueHandle<State>,
     ) {
         state.try_handle(|state| {

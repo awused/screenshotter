@@ -101,10 +101,14 @@ where
 pub fn init_logging() {
     LazyLock::force(&START); // Inititalize the start time.
 
-    let filter_layer =
-        EnvFilter::builder().with_default_directive(Level::INFO.into()).from_env_lossy();
+    let filter_layer = EnvFilter::builder()
+        .with_default_directive(Level::ERROR.into())
+        .from_env_lossy();
 
-    let fmt_layer = tracing_subscriber::fmt::layer().event_format(Format {});
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .event_format(Format {})
+        .with_writer(std::io::stderr);
+
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)

@@ -1,8 +1,5 @@
 use core::slice;
-use std::cell::OnceCell;
-use std::mem::swap;
 use std::rc::Rc;
-use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::bail;
@@ -13,10 +10,10 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
-use crate::util::{MLPoint, MRegion, Monitor};
+use crate::util::{MLPoint, Monitor};
 use crate::wayland::buffer::Buffer;
 use crate::wayland::protos::Protos;
-use crate::wayland::{OutputKey, State, Transform};
+use crate::wayland::{OutputKey, State};
 
 // Must be odd
 const RES: usize = 11;
@@ -69,15 +66,6 @@ impl Magnifier {
         self.crosshair_surface.attach(None, 0, 0);
         self.zoom_surface.commit();
         self.crosshair_surface.commit();
-    }
-
-    pub fn show(&self, freeze: &Rc<Buffer>, crosshair: &Buffer) {
-        trace!("Displaying magnifier");
-        self.zoom_surface.attach(Some(&freeze.wl_buffer), 0, 0);
-        self.crosshair_surface.attach(Some(&crosshair.wl_buffer), 0, 0);
-
-        self.zoom_surface.damage(0, 0, LARGE_RES as _, LARGE_RES as _);
-        self.crosshair_surface.damage(0, 0, LARGE_RES as _, LARGE_RES as _);
     }
 
     pub fn draw(&mut self, qh: &QueueHandle<State>, point: MLPoint) -> Result<bool> {
@@ -196,7 +184,7 @@ impl Magnifier {
         Ok(Self {
             protos: protos.clone(),
             output,
-            monitor: *monitor,
+            monitor: monitor.clone(),
 
             zoom_surface,
             zoom_subsurface,
@@ -328,10 +316,10 @@ impl Dispatch<WlBuffer, State> for MagnifierViewKey {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlBuffer,
-        event: <WlBuffer as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
-        qhandle: &QueueHandle<State>,
+        _proxy: &WlBuffer,
+        _event: <WlBuffer as wayland_client::Proxy>::Event,
+        _conn: &wayland_client::Connection,
+        _qhandle: &QueueHandle<State>,
     ) {
         state
             .outputs
@@ -352,9 +340,9 @@ impl Dispatch<WlCallback, State> for MagnifierKey {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlCallback,
-        event: <WlCallback as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
+        _proxy: &WlCallback,
+        _event: <WlCallback as wayland_client::Proxy>::Event,
+        _conn: &wayland_client::Connection,
         qh: &QueueHandle<State>,
     ) {
         state.try_handle(|state| {

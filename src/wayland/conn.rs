@@ -38,8 +38,7 @@ use crate::img::Screenshot;
 use crate::ipc::Window;
 use crate::util::MLPoint;
 use crate::wayland::output::Output;
-use crate::wayland::protos::Protos;
-use crate::wayland::{Format, Global, Mode, MouseState, OutputKey, SelectState, Selected, State, Status, WEIRD_TRANSFORMS, magnifier};
+use crate::wayland::{Global, Mode, MouseState, OutputKey, SelectState, Selected, State, Status, WEIRD_TRANSFORMS, magnifier};
 
 pub struct Conn {
     queue: EventQueue<State>,
@@ -117,7 +116,7 @@ impl Conn {
         info!("Starting selection {:?} with {} windows", self.state.mode, windows.len());
         self.state.windows = windows;
 
-        while !matches!(self.state.status, (Status::Selecting | Status::Done(_))) {
+        while !matches!(self.state.status, Status::Selecting | Status::Done(_)) {
             self.poll_once().await?;
         }
 
@@ -203,7 +202,15 @@ impl Conn {
         Ok(())
     }
 
-    pub fn take_screenshot(mut self) -> Result<Vec<Screenshot>> {
+    pub fn selected_screenshot(self) -> Result<Vec<Screenshot>> {
+        self.state.take_screenshot()
+    }
+
+    pub fn screenshot_window(mut self, window: Window) -> Result<Vec<Screenshot>> {
+        if !matches!(self.state.status, Status::Done(Selected::Nothing)) {
+            bail!("Expected nothing to be selected, but was {:?}", self.state.status);
+        }
+        self.state.status = Status::Done(Selected::Window(window));
         self.state.take_screenshot()
     }
 }
@@ -394,10 +401,10 @@ impl Dispatch<WlKeyboard, State> for Global {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlKeyboard,
+        _proxy: &WlKeyboard,
         event: <WlKeyboard as Proxy>::Event,
-        conn: &Connection,
-        qhandle: &QueueHandle<State>,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<State>,
     ) {
         // debug!("WlKeyboard: {event:?}");
         use wl_keyboard::Event;
@@ -427,14 +434,14 @@ impl Dispatch<WlKeyboard, State> for Global {
                         state.keystate = Some(XkbState::new(&keymap));
                     }
                 }
-                Event::Key { serial, time, key, state: key_state } => {
+                Event::Key { serial, time: _, key, state: key_state } => {
                     // TODO -- consider Enter as an alternative click
                     if key_state == KeyState::Pressed {
                         state.handle_key(serial, key)?;
                     }
                 }
                 Event::Modifiers {
-                    serial,
+                    serial: _,
                     mods_depressed,
                     mods_latched,
                     mods_locked,
@@ -486,7 +493,7 @@ impl Dispatch<WlSeat, State> for Global {
         state: &mut State,
         proxy: &WlSeat,
         event: <WlSeat as Proxy>::Event,
-        conn: &Connection,
+        _conn: &Connection,
         qh: &QueueHandle<State>,
     ) {
         trace!("WlSeat: {event:?}");
@@ -497,7 +504,11 @@ impl Dispatch<WlSeat, State> for Global {
 
 
         if capabilities.contains(Capability::Pointer) {
-            state.pointer.set(proxy.get_pointer(qh, Self));
+            let pointer = proxy.get_pointer(qh, Self);
+            if let Err(e) = state.pointer.set(pointer) {
+                warn!("Seat updated, this isn't handled");
+                e.release();
+            }
         }
 
         if capabilities.contains(Capability::Keyboard) {

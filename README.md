@@ -7,7 +7,8 @@ A tool to take screenshots and organize them based on the name of the applicatio
 
 Wayland version:
 * Sway or Hyprland
-* Some features not yet implemented (handling output transformations)
+* Works as a replacement for common `swayprop` and `hyprprop` scripts, handling more edge cases.
+* Does *not* require slurp or grim.
 * As of 2026-05 the Wayland ecosystem is not in a a great state.
 
 Terminal emulators or other multiplexers that have multiple windows with the same process and children are not well supported on Wayland.
@@ -55,8 +56,9 @@ Most of the configuration in screenshotter.toml is straightforward but overrides
 
 Use `IgnoredParents`/`ignored_parents` to cover the cases where you've started vim from zsh running in an xfce4-terminal window. Without any configuration the application name will be "xfce4-terminal", which is probably not what you want. By ignoring xfce4-terminal and zsh the tool will correctly detect "vim" as the application name.
 
-
 Any program specified with `Callback`/`callback` will be run after the screenshot has been taken. The filename will be supplied as the first argument and the same environment variables as for delegates (see below) will be set.
+
+For wayland you can speciy the positions of monitors in real pixels in `monitor_positions` to allow for unscaled outputs in some modes to be better positioned. There is no way to get perfect results across monitors with different scales.
 
 ## X11
 
@@ -109,4 +111,3 @@ If selecting a region spanning multiple visible windows the application will be 
 # Credit
 
 * [slurp](https://github.com/emersion/slurp) Used as a reference for some parts of the Wayland interface.
-* [grim](https://gitlab.freedesktop.org/emersion/grim)

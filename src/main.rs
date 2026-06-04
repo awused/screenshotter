@@ -1,12 +1,8 @@
-#![allow(unused)] // TODO remove
-
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
-use std::thread::{self, available_parallelism};
-use std::time::Instant;
+use std::thread::available_parallelism;
 
 use clap::Parser;
 use color_eyre::Result;
@@ -15,27 +11,30 @@ use futures::future::{Either, select};
 use notify_rust::{Notification, Urgency};
 use rayon::ThreadPoolBuilder;
 use serde_json::Value;
+use time::OffsetDateTime;
 use tokio::pin;
 
+use crate::app::{Finder, MODE};
 use crate::config::CONFIG;
 use crate::ipc::Window;
-use crate::target::MODE;
-use crate::util::LFRegion;
 use crate::wayland::conn::Conn;
 use crate::wayland::{Mode, Selected};
 
 #[macro_use]
 extern crate tracing;
 
+mod app;
 mod config;
 mod elapsedlogger;
 mod img;
 mod ipc;
-mod target;
 mod util;
 mod wayland;
 
 const CLICK_TIME_MS: u32 = 100;
+
+pub static TIME: LazyLock<OffsetDateTime> =
+    LazyLock::new(|| OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc()));
 
 #[derive(Debug, Parser)]
 enum Command {
@@ -69,7 +68,7 @@ enum Command {
 #[derive(Debug, Parser)]
 #[clap(
     name = "screenshotter",
-    about = "Tool for taking screenshots and organizing them"
+    about = "Tool for taking screenshots and organizing them, or replacing xprop"
 )]
 pub struct Opt {
     #[arg(short, long, value_parser)]
@@ -90,6 +89,7 @@ pub static OPTIONS: LazyLock<Opt> = LazyLock::new(Opt::parse);
 async fn main() -> Result<()> {
     elapsedlogger::init_logging();
     color_eyre::install().unwrap();
+    LazyLock::force(&TIME);
     trace!("Starting main");
 
 
@@ -113,17 +113,26 @@ async fn window() -> Result<()> {
     init_threadpool();
 
     let mut con = Conn::init(Mode::ScreenshotOnly)?;
+    let finder = app::Finder::init();
+
+    let windows = while_polling(ipc::visible_windows(true), &mut con).await?;
+    if windows.len() != 1 {
+        bail!("No active window found");
+    }
+    let window = windows.into_iter().next().unwrap();
 
     let selection = con.run(Vec::new()).await?;
-    if !matches!(Selected::Nothing, selection) {
+    if !matches!(selection, Selected::Nothing) {
         bail!("Wrong selection, expected nothing, got {selection:?}");
     }
+    let app = finder.application_for_spawned(Selected::Window(window.clone()));
 
-    // TODO -- get the active window from IPC
+    let screenshots = con.screenshot_window(window)?;
+    let combined = img::combine(screenshots, true);
 
-    con.poll().await?;
+    let app = app.await??;
 
-    // let app = app.await?;
+    app.save_file(combined)?;
 
     Ok(())
 }
@@ -136,16 +145,18 @@ async fn desktop(unscaled: bool) -> Result<()> {
     init_threadpool();
 
     let mut con = Conn::init(Mode::ScreenshotOnly)?;
+    let app = Finder::empty().application_for_spawned(Selected::Nothing);
     let selection = con.run(Vec::new()).await?;
-    if !matches!(Selected::Nothing, selection) {
+    if !matches!(selection, Selected::Nothing) {
         bail!("Wrong selection, expected nothing, got {selection:?}");
     }
 
-    let screenshots = con.take_screenshot()?;
-
+    let screenshots = con.selected_screenshot()?;
     let combined = img::combine(screenshots, !unscaled);
 
-    combined.save("/tmp/screenshotter/output.pnm").unwrap();
+    let app = app.await??;
+
+    app.save_file(combined)?;
 
     Ok(())
 }
@@ -158,19 +169,22 @@ async fn region() -> Result<()> {
     init_threadpool();
 
     let mut con = Conn::init(Mode::Region)?;
-    let mut finder = target::ApplicationFinder::init();
-    let windows = while_polling(ipc::visible_windows(), &mut con).await?;
+    let finder = app::Finder::init();
+    let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
 
     let selection = con.run(windows).await?;
+    if matches!(selection, Selected::Nothing) {
+        bail!("Wrong selection, expected something, got nothing");
+    }
     debug!("Selected region {:?}", selection.int_region());
     let app = finder.application_for_spawned(selection.clone());
 
-    let screenshots = con.take_screenshot()?;
-
+    let screenshots = con.selected_screenshot()?;
     let combined = img::combine(screenshots, true);
 
-    combined.save("/tmp/screenshotter/output.pnm").unwrap();
-    let app = app.await?;
+    let app = app.await??;
+
+    app.save_file(combined)?;
 
     Ok(())
 }
@@ -180,9 +194,10 @@ async fn region() -> Result<()> {
 async fn name() -> Result<()> {
     trace!("Starting name");
     LazyLock::force(&CONFIG);
-    let mut finder = target::ApplicationFinder::init();
+
     let mut con = Conn::init(Mode::PickWindow)?;
-    let windows = while_polling(ipc::visible_windows(), &mut con).await?;
+    let finder = app::Finder::init();
+    let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
 
 
     let selection = con.run(windows).await?;
@@ -212,7 +227,7 @@ async fn name() -> Result<()> {
 async fn prop() -> Result<()> {
     trace!("Starting prop");
     let mut con = Conn::init(Mode::PickWindow)?;
-    let windows = while_polling(ipc::visible_windows(), &mut con).await?;
+    let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
 
     let selection = con.run(windows).await?;
     if let Selected::Window(w) = selection {
@@ -224,7 +239,7 @@ async fn prop() -> Result<()> {
 
 #[instrument(level = "error", skip_all)]
 async fn visible() -> Result<()> {
-    let windows = ipc::visible_windows().await?;
+    let windows = ipc::visible_windows(false).await?;
 
     let json = Value::Array(windows.iter().map(Window::to_json).collect::<Vec<_>>());
 

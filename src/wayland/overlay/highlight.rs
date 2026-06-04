@@ -1,6 +1,5 @@
 use core::slice;
 use std::cmp::{max, min};
-use std::time::Instant;
 
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use wayland_client::Dispatch;
@@ -81,11 +80,10 @@ impl Highlight {
                 // Doing this from multiple threads with par_bridge() is just barely faster by
                 // enough to be even a little bit useful.
                 buf.chunks_exact_mut(stride)
-                    .enumerate()
                     .skip(region.y as _)
                     .take(region.height as _)
                     .par_bridge()
-                    .for_each(|(y, row)| {
+                    .for_each(|row| {
                         row[region.x as usize..(region.x + region.width) as usize].fill(fill);
                     });
             }
@@ -137,12 +135,12 @@ impl Dispatch<WlBuffer, State> for HighlightKey {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlBuffer,
+        _proxy: &WlBuffer,
         event: <WlBuffer as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
-        qhandle: &wayland_client::QueueHandle<State>,
+        _conn: &wayland_client::Connection,
+        _qhandle: &wayland_client::QueueHandle<State>,
     ) {
-        if !matches!(wl_buffer::Event::Release, event) {
+        if !matches!(event, wl_buffer::Event::Release) {
             return;
         }
 

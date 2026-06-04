@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use color_eyre::Result;
 use color_eyre::eyre::{OptionExt, bail};
-use image::{DynamicImage, Rgb, RgbImage, RgbaImage};
+use image::Rgb;
 use libc::{
     MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE, close, ftruncate, shm_open,
     shm_unlink,
@@ -82,9 +82,7 @@ impl Buffer {
                     r[2] = c[0];
                 }
             }
-            Format::Bgr888 => unsafe {
-                row.copy_from_slice(read);
-            },
+            Format::Bgr888 => row.copy_from_slice(read),
         }
     }
 

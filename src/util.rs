@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::fmt::Display;
+use std::rc::Rc;
 
 use color_eyre::eyre::OptionExt;
 use serde::Serialize;
@@ -9,13 +10,6 @@ use crate::wayland::Transform;
 
 // A region contains the points (x, y) and (x + width - 1, y + height - 1)
 // x + width is the column just past the edge of the window
-
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct SelectPoint {
-    logical: LPoint,
-    precise: MLPoint,
-}
 
 // A point in global logical space.
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
@@ -51,12 +45,13 @@ pub struct LRegion {
     pub height: i32,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Default)]
+#[derive(Debug, PartialEq, Clone, Default)]
 pub struct Monitor {
     pub logical: LRegion,
     pub physical: MRegion,
     pub scale: f64,
     pub transform: Transform,
+    pub description: Rc<str>,
 }
 
 // A region in monitor-local pixels, after applying scales. (0, 0) is the top left corner of the
@@ -139,26 +134,16 @@ impl Monitor {
 }
 
 impl LFRegion {
-    pub const fn upper_left(&self) -> LPoint {
-        LPoint { x: self.x, y: self.y }
-    }
-
     pub const fn output_region(&self, scale: u32) -> ORegion {
-        let x = ((self.x * scale as f64 + 60.) / 120.).trunc() as i32;
-        let y = ((self.y * scale as f64 + 60.) / 120.).trunc() as i32;
-        let width = ((self.width * scale as f64 + 60.) / 120.).trunc() as i32;
-        let height = ((self.height * scale as f64 + 60.) / 120.).trunc() as i32;
-        ORegion { x, y, width, height }
-    }
-
-    pub const fn output_region_unscaled(&self, scale: u32, dimensions: (u32, u32)) -> ORegion {
-        let x = ((self.x * 120. + 60.) / 120.).trunc() as i32;
-        let y = ((self.y * 120. + 60.) / 120.).trunc() as i32;
+        let x = ((self.x * scale as f64 + 60.) / 120.).floor() as i32;
+        let y = ((self.y * scale as f64 + 60.) / 120.).floor() as i32;
+        let right = (((self.x + self.width) * scale as f64 + 60.) / 120.).floor() as i32;
+        let bottom = (((self.y + self.height) * scale as f64 + 60.) / 120.).floor() as i32;
         ORegion {
             x,
             y,
-            width: dimensions.0 as _,
-            height: dimensions.1 as _,
+            width: right - x,
+            height: bottom - y,
         }
     }
 
@@ -237,7 +222,7 @@ impl LRegion {
             && point.y < self.height as f64
     }
 
-    // Returns a non-empty intersection
+    #[cfg(feature = "hyprland")]
     pub fn intersect(self, other: &Self) -> Option<Self> {
         let left = max(self.x, other.x);
         let right = min(self.x + self.width, other.x + other.width);
@@ -255,17 +240,6 @@ impl LRegion {
         }
     }
 
-    // This should only be necessary when the selection crosses boundaries.
-    pub fn monitor_intersect(self, m: &Monitor) -> Option<(Self, MRegion)> {
-        let logical = self.intersect(&m.logical)?;
-        let x = ((logical.x - m.logical.x) as f64 * m.scale).floor() as _;
-        let y = ((logical.y - m.logical.y) as f64 * m.scale).floor() as _;
-        let width = (logical.width as f64 * m.scale).ceil() as _;
-        let height = (logical.height as f64 * m.scale).ceil() as _;
-
-        Option::Some((logical, MRegion { x, y, width, height }))
-    }
-
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
@@ -275,31 +249,9 @@ impl MRegion {
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
-
-    pub fn contains(&self, MLPoint { x, y }: MLPoint) -> bool {
-        self.x as f64 <= x && self.width as f64 > x && self.y as f64 <= y && self.height as f64 > y
-    }
 }
 
-impl LPoint {
-    pub fn bounding_region(&self, other: &Self) -> LFRegion {
-        let Self { x: x1, y: y1 } = *self;
-        let Self { x: x2, y: y2 } = *other;
-
-        let left = f64::min(x1, x2);
-        let right = f64::max(x1, x2);
-        let top = f64::min(y1, y2);
-        let bottom = f64::max(y1, y2);
-
-        LFRegion {
-            x: left,
-            y: top,
-            width: right - left + 1.0,
-            height: bottom - top + 1.0,
-        }
-    }
-}
-
+#[derive(Debug)]
 pub enum Overlap {
     Nothing,
     X(i32),
@@ -307,7 +259,8 @@ pub enum Overlap {
 }
 
 impl ORegion {
-    // Greedy, prioritize the smallest movement
+    // Greedy, prioritize the smallest movement. self should also be at a lower index than other in
+    // the list, so prioritize moving other just for consistency.
     pub fn overlap(&self, other: &Self) -> Overlap {
         let left = max(self.x, other.x);
         let right = min(self.x + self.width, other.x + other.width);

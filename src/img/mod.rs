@@ -1,8 +1,8 @@
-use color_eyre::eyre::bail;
 use image::RgbImage;
 
+use crate::config::CONFIG;
 use crate::img::resample::resize_par_linear;
-use crate::util::{LFRegion, MRegion, ORegion, Overlap};
+use crate::util::{LFRegion, MRegion, Monitor, ORegion, Overlap};
 
 mod resample;
 
@@ -10,11 +10,36 @@ mod resample;
 pub struct Screenshot {
     pub image: RgbImage,
     pub logical: LFRegion,
-    pub int_scale: u32,
+    pub monitor_region: MRegion,
+    pub monitor: Monitor,
+}
+
+impl Screenshot {
+    pub fn output_region_unscaled(&self) -> ORegion {
+        println!("{}", self.monitor.description);
+        let (x, y) = if let Some(pos) = CONFIG
+            .monitor_positions
+            .iter()
+            .find(|p| self.monitor.description.contains(&p.id))
+        {
+            (pos.x + self.monitor_region.x, pos.y + self.monitor_region.y)
+        } else {
+            let x = (self.logical.x + 0.5).floor() as i32;
+            let y = (self.logical.y + 0.5).floor() as i32;
+
+            (x, y)
+        };
+
+        ORegion {
+            x,
+            y,
+            width: self.image.width() as _,
+            height: self.image.height() as _,
+        }
+    }
 }
 
 fn fix_overlaps(regions: &mut [ORegion]) {
-    let mut overlap = true;
     'outer: loop {
         for i in 0..regions.len() - 1 {
             for j in i + 1..regions.len() {
@@ -48,21 +73,21 @@ fn fix_overlaps(regions: &mut [ORegion]) {
 pub fn combine(shots: Vec<Screenshot>, scale_up: bool) -> RgbImage {
     assert!(!shots.is_empty(), "Cannot produce final image if there are no screenshots");
 
-    let mut max_scale = shots[0].int_scale;
+    let mut max_scale = shots[0].monitor.fixed_scale();
 
     for s in &shots[1..] {
-        if s.int_scale > max_scale {
-            max_scale = s.int_scale;
+        if s.monitor.fixed_scale() > max_scale {
+            max_scale = s.monitor.fixed_scale();
         }
     }
 
     let mut output_regions: Vec<_> = shots
         .iter()
         .map(|s| {
-            if (scale_up) {
+            if scale_up {
                 s.logical.output_region(max_scale)
             } else {
-                s.logical.output_region_unscaled(s.int_scale, s.image.dimensions())
+                s.output_region_unscaled()
             }
         })
         .collect();
@@ -72,7 +97,7 @@ pub fn combine(shots: Vec<Screenshot>, scale_up: bool) -> RgbImage {
 
     for (out, shot) in output_regions.iter_mut().zip(&shots) {
         // If this is ever off we have a problem
-        if (shot.int_scale == max_scale || !scale_up)
+        if (shot.monitor.fixed_scale() == max_scale || !scale_up)
             && (out.width as u32, out.height as u32) != shot.image.dimensions()
         {
             // This can happen when scales don't match, and we get a position that is logically
@@ -84,6 +109,10 @@ pub fn combine(shots: Vec<Screenshot>, scale_up: bool) -> RgbImage {
                 (out.width, out.height),
                 shot.image.dimensions()
             );
+            if shots.len() == 1 {
+                out.width = shot.image.width() as _;
+                out.height = shot.image.height() as _;
+            }
         }
 
         assert!(out.width > 0);
@@ -107,9 +136,9 @@ pub fn combine(shots: Vec<Screenshot>, scale_up: bool) -> RgbImage {
     let out_stride = width as usize * 3;
 
     for (region, shot) in output_regions.into_iter().zip(shots) {
-        let mut img = shot.image;
+        let img = shot.image;
 
-        let (width, img) = if (shot.int_scale != max_scale && scale_up) {
+        let (width, img) = if scale_up && shot.monitor.fixed_scale() != max_scale {
             let current = (img.width(), img.height());
 
             // TODO -- resample directly into the final buffer, skipping the de-rotate in

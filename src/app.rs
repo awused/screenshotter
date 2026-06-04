@@ -1,25 +1,30 @@
 use std::cell::LazyCell;
 use std::cmp::Reverse;
 use std::ffi::{OsStr, OsString};
+use std::fs::{DirBuilder, File};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::thread;
+use std::time::Instant;
 
-use color_eyre::eyre::{OptionExt, eyre};
+use color_eyre::eyre::{bail, eyre};
 use color_eyre::{Result, Section, SectionExt};
 use constcat::concat;
+use image::RgbImage;
+use image::codecs::png::PngEncoder;
+use image::codecs::webp::WebPEncoder;
+use path_clean::PathClean;
 use regex::{Regex, bytes};
 use strfmt::strfmt_map;
 use sysinfo::{Pid, System};
+use time::macros::format_description;
 use tokio::process::Command;
 use tokio::task::{JoinHandle, spawn_blocking};
 
-use crate::ENV_VARS;
-use crate::config::{CONFIG, Override, Reformatter};
-use crate::ipc::Window;
-use crate::util::LRegion;
+use crate::config::{CONFIG, FileFormat, Override, Reformatter};
 use crate::wayland::Selected;
+use crate::{ENV_VARS, TIME};
 
 
 const PREFIX: &str = "SCREENSHOTTER_";
@@ -41,13 +46,77 @@ pub struct Application {
     pub callback: Option<&'static Path>,
 }
 
+impl Application {
+    pub fn save_file(self, combined: RgbImage) -> Result<PathBuf> {
+        let dir = &CONFIG.screenshot_dir.join(self.relative_dir);
+        if !dir.clean().starts_with(&CONFIG.screenshot_dir) {
+            bail!("Computed directory {dir:?} not in configured screenshot dir");
+        }
+
+        let mut path = if self.yearly && self.monthly {
+            dir.join(TIME.format(format_description!("[year]"))?)
+                .join(TIME.format(format_description!("[month]"))?)
+                .join(TIME.format(format_description!("[day]_[hour]-[minute]-[second]"))?)
+        } else if self.yearly {
+            dir.join(TIME.format(format_description!("[year]"))?)
+                .join(TIME.format(format_description!("[month]-[day]_[hour]-[minute]-[second]"))?)
+        } else if self.monthly {
+            dir.join(TIME.format(format_description!("[year]-[month]"))?)
+                .join(TIME.format(format_description!("[day]_[hour]-[minute]-[second]"))?)
+        } else {
+            dir.join(
+                TIME.format(format_description!("[year]-[month]-[day]_[hour]-[minute]-[second]"))?,
+            )
+        };
+
+        DirBuilder::new().recursive(true).mode(0o755).create(path.parent().unwrap())?;
+
+        let start = Instant::now();
+        match CONFIG.format {
+            FileFormat::Png => {
+                path.add_extension("png");
+                let enc = PngEncoder::new_with_quality(
+                    File::create_new(&path)?,
+                    image::codecs::png::CompressionType::Level(CONFIG.compression),
+                    image::codecs::png::FilterType::Adaptive,
+                );
+                combined.write_with_encoder(enc)?;
+            }
+            FileFormat::Webp => {
+                path.add_extension("webp");
+                let enc = WebPEncoder::new_lossless(File::create_new(&path)?);
+                combined.write_with_encoder(enc)?;
+            }
+        }
+        info!("Saved file {path:?} in {:?}", start.elapsed());
+
+
+        debug!("Wrote file in {:?}", start.elapsed());
+
+
+        if let Some(callback) = self.callback
+            && let Err(e) = run_callback(callback, &path)
+        {
+            error!("Override callback failed with error {e:?}");
+        }
+
+        if let Some(callback) = &CONFIG.callback
+            && let Err(e) = run_callback(callback, &path)
+        {
+            error!("Callback failed with error {e:?}");
+        }
+
+        Ok(path)
+    }
+}
+
 #[derive(Debug, Default)]
-pub struct ApplicationFinder {
+pub struct Finder {
     system: Option<JoinHandle<System>>,
 }
 
 
-impl ApplicationFinder {
+impl Finder {
     pub fn init() -> Self {
         let system = spawn_blocking(|| {
             let mut system = System::new();
@@ -76,15 +145,12 @@ impl ApplicationFinder {
 
     // Can't meaningfully avoid spinning up another thread here, but if spawn_blocking with a
     // single threaded executor ensures there are no entirely wasted threads.
-    pub fn application_for_spawned(
-        mut self,
-        selection: Selected,
-    ) -> JoinHandle<Result<Application>> {
+    pub fn application_for_spawned(self, selection: Selected) -> JoinHandle<Result<Application>> {
         spawn_blocking(move || self.async_main(selection))
     }
 
     #[tokio::main(flavor = "current_thread")]
-    async fn async_main(mut self, selection: Selected) -> Result<Application> {
+    async fn async_main(self, selection: Selected) -> Result<Application> {
         self.application_for(&selection).await
     }
 
@@ -92,10 +158,9 @@ impl ApplicationFinder {
     #[instrument(level = "error", skip_all)]
     pub async fn application_for(mut self, selection: &Selected) -> Result<Application> {
         let mut env = ENV_VARS.lock().unwrap();
-        env.insert(
-            GEOMETRY,
-            selection.int_region().ok_or_eyre("No region selected")?.to_string().into(),
-        );
+        if let Some(region) = selection.int_region() {
+            env.insert(GEOMETRY, region.to_string().into());
+        }
 
         let mut application = Application::default();
         let mut cli = None;
@@ -142,19 +207,27 @@ impl ApplicationFinder {
         drop(env);
 
         for over in &CONFIG.overrides {
-            if run_override(&mut application, &cli, over).await? {
+            let (matched, path) = check_override(&application, &cli, over).await?;
+            if !matched {
+                continue;
+            }
+
+            if let Some(path) = path {
+                application.relative_dir = path;
+
                 let mut env = ENV_VARS.lock().unwrap();
                 env.insert(NAME, application.relative_dir.clone().into());
 
                 let mut dir = CONFIG.screenshot_dir.clone();
                 dir.push(&application.relative_dir);
                 env.insert(DIR, dir.into());
-
-
-                drop(env);
-
-                break;
             }
+
+            application.yearly = over.yearly;
+            application.monthly = over.monthly;
+            application.callback = over.callback.as_deref();
+
+            break;
         }
 
         debug!("Determined application to be {application:?}");
@@ -211,17 +284,17 @@ fn get_process(system: System, name: String, pid: u32) -> (OsString, Option<OsSt
 }
 
 #[instrument(level = "error", skip(app, cli))]
-async fn run_override(
-    app: &mut Application,
+async fn check_override(
+    app: &Application,
     cli: &Option<OsString>,
     over: &'static Override,
-) -> Result<bool> {
+) -> Result<(bool, Option<PathBuf>)> {
     debug!("Testing override");
     if let Some(name) = &over.name
         && Path::new(name) != app.relative_dir
     {
         trace!("Name didn't match");
-        return Ok(false);
+        return Ok((false, None));
     }
 
     let caps = if let Some(re) = &over.regex {
@@ -233,13 +306,15 @@ async fn run_override(
             Some(cap)
         } else {
             trace!("Regex didn't match");
-            return Ok(false);
+            return Ok((false, None));
         }
     } else {
         None
     };
 
     // Delegate exiting with a failure is not fatal, but means it didn't match
+
+    let mut dir = None;
 
     match &over.transform {
         Some(Reformatter::Format(template)) => {
@@ -255,32 +330,29 @@ async fn run_override(
                 }
             })?;
 
-            app.relative_dir = convert_application_name(&new_name).into();
+            dir = Some(convert_application_name(&new_name).into());
         }
         Some(Reformatter::Delegate(delegate)) => match run_delegate(delegate).await {
             Ok(Some(path)) => {
                 debug!("Delegate matched with output: {path:?}");
-                app.relative_dir = path;
+                dir = Some(path);
             }
             Ok(None) => {
                 debug!("Delegate matched with no output");
             }
             Err(_) => {
                 debug!("Delegate didn't match");
-                return Ok(false);
+                return Ok((false, None));
             }
         },
         None => {}
     }
 
-    app.yearly = over.yearly;
-    app.monthly = over.monthly;
-    app.callback = over.callback.as_deref();
-
-    Ok(true)
+    Ok((true, dir))
 }
 
 #[instrument(level = "error", skip_all, err(level = "debug", Debug))]
+#[allow(clippy::await_holding_lock)] // false positive
 async fn run_delegate(delegate: &Path) -> Result<Option<PathBuf>> {
     let env = ENV_VARS.lock().unwrap();
     trace!("Running delegate with env: {:#?}", env);
@@ -314,6 +386,29 @@ async fn run_delegate(delegate: &Path) -> Result<Option<PathBuf>> {
     }
 
     if path.as_os_str().is_empty() { Ok(None) } else { Ok(Some(path)) }
+}
+
+#[instrument(level = "error", err(level = "debug", Debug))]
+fn run_callback(callback: &Path, output_path: &Path) -> Result<()> {
+    let env = ENV_VARS.lock().unwrap();
+    trace!("Running callback with path: {output_path:?} and env: {:#?}", env);
+
+    let mut cmd = std::process::Command::new(callback);
+    cmd.envs(env.iter());
+    cmd.arg(output_path);
+    drop(env);
+    let output = cmd.output()?;
+
+    if !output.status.success() {
+        let out = String::from_utf8_lossy(&output.stdout).to_string().header("Stdout");
+        let err = String::from_utf8_lossy(&output.stderr).to_string().header("Stderr");
+        let e = eyre!("Output status code: {:?}", output.status.code())
+            .section(out)
+            .section(err);
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 static SAFE_FILENAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\pL\pN\-_+=]+").unwrap());

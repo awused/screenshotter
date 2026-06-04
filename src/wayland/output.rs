@@ -8,11 +8,10 @@ use wayland_client::{Dispatch, NoopIgnore, QueueHandle};
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::Options;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
 
-use crate::util::{LFRegion, LRegion, Monitor};
+use crate::util::{LFRegion, Monitor};
 use crate::wayland::capture::Capture;
 use crate::wayland::overlay::Overlay;
-use crate::wayland::protos::Protos;
-use crate::wayland::{Mode, OutputKey, State, Transform};
+use crate::wayland::{OutputKey, State, Transform};
 
 
 #[derive(Debug)]
@@ -47,7 +46,7 @@ impl Output {
         qhandle: &QueueHandle<State>,
         region: Option<LFRegion>,
     ) -> Result<()> {
-        let region = region.and_then(|r| self.monitor.intersect_rounded(&r)).map(|(l, m)| m);
+        let region = region.and_then(|r| self.monitor.intersect_rounded(&r)).map(|(_l, m)| m);
 
         self.overlay.get_mut().unwrap().draw_box(qhandle, region)
     }
@@ -66,46 +65,43 @@ impl Dispatch<WlOutput, State> for OutputKey {
 
         trace!("WlOutput: {self:?} {event:?}");
 
-        if let Event::Mode { width, height, .. } = event {
-            state.try_handle(|state| {
-                let output =
-                    state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {self:?}"))?;
-
-                if !output.monitor.physical.is_empty() {
-                    bail!("Got second mode for output {self:?}");
-                }
-
-                if output.monitor.transform.rotate() {
-                    output.monitor.physical.width = height;
-                    output.monitor.physical.height = width;
-                } else {
-                    output.monitor.physical.width = width;
-                    output.monitor.physical.height = height;
-                }
-
-                Ok(())
-            });
-            return;
-        }
-
-        if let Event::Geometry { transform, .. } = event {
-            let transform = Transform(transform);
-
-            let output = state.outputs.get_mut(self).unwrap();
-            output.monitor.transform = transform;
-
-            if transform.rotate() {
-                swap(&mut output.monitor.physical.width, &mut output.monitor.physical.height)
-            }
-
-            return;
-        }
-
-        // Initialize all the layers/managers for this session
-        if !matches!(event, Event::Done) {
-            return;
-        }
         state.try_handle(|state| {
+            let output = state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {self:?}"))?;
+
+            let _unused = match event {
+                Event::Geometry { transform, .. } => {
+                    let transform = Transform(transform);
+
+                    output.monitor.transform = transform;
+
+                    if transform.rotate() {
+                        swap(
+                            &mut output.monitor.physical.width,
+                            &mut output.monitor.physical.height,
+                        )
+                    }
+                    return Ok(());
+                }
+                Event::Mode { width, height, .. } => {
+                    if !output.monitor.physical.is_empty() {
+                        bail!("Got second mode for output {self:?}");
+                    }
+
+                    if output.monitor.transform.rotate() {
+                        output.monitor.physical.width = height;
+                        output.monitor.physical.height = width;
+                    } else {
+                        output.monitor.physical.width = width;
+                        output.monitor.physical.height = height;
+                    }
+                    return Ok(());
+                }
+                Event::Done => true,
+                Event::Scale { .. } | Event::Description { .. } | Event::Name { .. } | _ => {
+                    return Ok(());
+                }
+            };
+
             let format = state.transparent_format();
             let output = state.outputs.get_mut(self).ok_or_else(|| eyre!("No output {self:?}"))?;
             if output.pending_done == 0 {
@@ -157,7 +153,6 @@ impl Dispatch<WlOutput, State> for OutputKey {
                     )?)
                     .unwrap();
             }
-
             Ok(())
         });
     }
@@ -189,7 +184,10 @@ impl Dispatch<ZxdgOutputV1, State> for OutputKey {
                     region.width = width;
                     region.height = height;
                 }
-                Event::Name { .. } | Event::Description { .. } | Event::Done | _ => {}
+                Event::Description { description } => {
+                    output.monitor.description = description.into();
+                }
+                Event::Name { .. } | Event::Done | _ => {}
             }
             Ok(())
         });

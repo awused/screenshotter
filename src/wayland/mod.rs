@@ -2,28 +2,21 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
-use color_eyre::eyre::{bail, eyre};
+use color_eyre::eyre::bail;
 use color_eyre::{Report, Result};
-use futures::future::err;
 use input_event_codes::{BTN_LEFT, BTN_RIGHT};
-use libc::input_event;
-use wayland_client::protocol::wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard};
 use wayland_client::protocol::wl_output::{self};
-use wayland_client::protocol::wl_pointer::{self, ButtonState, WlPointer};
-use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
-use wayland_client::protocol::wl_shm::{self, WlShm};
+use wayland_client::protocol::wl_pointer::{ButtonState, WlPointer};
+use wayland_client::protocol::wl_shm::{self};
 use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Connection, Dispatch, NoopIgnore, Proxy, QueueHandle};
-use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
-use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
-use xkbcommon::xkb::{Context, Keycode, Keymap, Keysym, State as XkbState};
+use wayland_client::{NoopIgnore, QueueHandle};
+use xkbcommon::xkb::{Keycode, Keysym, State as XkbState};
 
 use crate::CLICK_TIME_MS;
 use crate::img::Screenshot;
 use crate::ipc::Window;
-use crate::util::{LFRegion, LRegion, MLPoint, MRegion};
+use crate::util::{LFRegion, LRegion, MLPoint};
 use crate::wayland::buffer::Buffer;
 use crate::wayland::magnifier::Magnifier;
 use crate::wayland::output::Output;
@@ -96,7 +89,6 @@ pub enum Mode {
     ScreenshotOnly,
     Region,
     PickWindow,
-    // Window(Window)
 }
 
 impl Mode {
@@ -298,11 +290,12 @@ impl State {
             warn!("Mouse entered surface {surface:?} it was already in");
         }
 
-        let (key, output) = self
+        let key = self
             .outputs
             .iter()
             .find(|(_k, v)| v.overlay.get().unwrap().freeze_surface == surface)
-            .unwrap();
+            .unwrap()
+            .0;
 
         self.mouse.hover = Some(Hover {
             entered: surface,
@@ -355,11 +348,11 @@ impl State {
             let Some((k, o)) = self
                 .outputs
                 .iter()
-                .find(|(k, v)| v.monitor.logical.contains(global))
+                .find(|(_k, v)| v.monitor.logical.contains(global))
                 .or_else(|| {
                     // Dragging mouse events can be just barely off-screen.
                     // Could snap these into the region, but that actually seems undesirable.
-                    self.outputs.iter().find(|(k, v)| v.monitor.logical.contains_lenient(global))
+                    self.outputs.iter().find(|(_k, v)| v.monitor.logical.contains_lenient(global))
                 })
             else {
                 warn!(
@@ -403,12 +396,7 @@ impl State {
         match self.select_state {
             SelectState::Hovering => self.update_hover(qh, None),
             SelectState::OverWindow(i) => self.update_hover(qh, Some(i)),
-            SelectState::Dragging {
-                start_pixel,
-                ref mut region,
-                start_time,
-                initial_window,
-            } => {
+            SelectState::Dragging { start_pixel, ref mut region, .. } => {
                 let Some(Hover { outkey, corrected, .. }) = self.mouse.hover else {
                     warn!("Mouse is not on a surface, not updating overlay");
                     return;
@@ -517,12 +505,8 @@ impl State {
                 initial_window,
             }
         } else if b_state == ButtonState::Released
-            && let SelectState::Dragging {
-                start_pixel: start,
-                region,
-                start_time,
-                initial_window,
-            } = self.select_state
+            && let SelectState::Dragging { region, start_time, initial_window, .. } =
+                self.select_state
         {
             if time.wrapping_sub(start_time) <= CLICK_TIME_MS {
                 if let Some(i) = initial_window {
@@ -541,7 +525,7 @@ impl State {
         }
     }
 
-    fn handle_key(&self, serial: u32, key: u32) -> Result<()> {
+    fn handle_key(&self, _serial: u32, key: u32) -> Result<()> {
         let Some(ref keystate) = self.keystate else {
             warn!("Got key press with no keymap, treating as escape");
             bail!("Cancelled");
@@ -574,7 +558,7 @@ impl State {
     }
 
     #[instrument(level = "error", skip_all)]
-    fn take_screenshot(mut self) -> Result<Vec<Screenshot>> {
+    fn take_screenshot(self) -> Result<Vec<Screenshot>> {
         let Status::Done(selected) = self.status else {
             unreachable!();
         };
@@ -594,12 +578,13 @@ impl State {
             .outputs
             .into_values()
             .filter_map(|o| o.monitor.intersect_rounded(&region).map(|(l, r)| (o, l, r)))
-            .map(|(o, logical, r)| {
-                let image = o.capture.take_screenshot(&o.monitor, r);
+            .map(|(o, logical, monitor_region)| {
+                let image = o.capture.take_screenshot(&o.monitor, monitor_region);
                 Screenshot {
                     image,
                     logical,
-                    int_scale: o.monitor.fixed_scale(),
+                    monitor_region,
+                    monitor: o.monitor,
                 }
             })
             .collect();
@@ -611,10 +596,7 @@ impl State {
         info!("Captured regions on {} monitors", segments.len());
         debug!(
             "Regions: {:?}",
-            segments
-                .iter()
-                .map(|s| (s.logical, s.image.dimensions(), s.int_scale))
-                .collect::<Vec<_>>()
+            segments.iter().map(|s| (s.logical, s.image.dimensions())).collect::<Vec<_>>()
         );
 
         Ok(segments)
@@ -680,13 +662,13 @@ impl Transform {
     // a 1440p monitor with a rotation applied would be (1440, 2560)
     const fn correct(self, (x, y): (i32, i32), (width, height): (i32, i32)) -> (i32, i32) {
         match self.0.0 {
-            1 => (y, width as i32 - x - 1),
-            2 => (width as i32 - x - 1, height as i32 - y - 1),
-            3 => (height as i32 - y - 1, x),
-            4 => (width as i32 - x - 1, y),
+            1 => (y, width - x - 1),
+            2 => (width - x - 1, height - y - 1),
+            3 => (height - y - 1, x),
+            4 => (width - x - 1, y),
             5 => (y, x),
-            6 => (x, height as i32 - y - 1),
-            7 => (height as i32 - y - 1, width as i32 - x - 1),
+            6 => (x, height - y - 1),
+            7 => (height - y - 1, width - x - 1),
             _ => (x, y),
         }
     }

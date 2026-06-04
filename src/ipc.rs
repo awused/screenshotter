@@ -5,15 +5,14 @@ use serde_json::Value;
 use tokio::{pin, select};
 #[cfg(feature = "hyprland")]
 use {
-    hyprland::data::{Clients, Monitors, Workspaces},
-    hyprland::shared::HyprData,
+    hyprland::data::{Client, Clients, Monitors, Workspaces},
+    hyprland::shared::{HyprData, HyprDataActiveOptional},
     std::collections::HashMap,
     tokio::try_join,
 };
 #[cfg(feature = "sway")]
 use {std::collections::VecDeque, swayipc::Connection, tokio::task::spawn_blocking};
 
-#[cfg(feature = "hyprland")]
 use crate::util::LRegion;
 
 
@@ -113,7 +112,7 @@ impl Window {
 
 #[cfg(feature = "sway")]
 #[instrument(level = "error", skip_all)]
-fn sway_blocking() -> Result<Vec<Window>> {
+fn sway_blocking(active: bool) -> Result<Vec<Window>> {
     let mut con = Connection::new()?;
     let root = con.get_tree()?;
 
@@ -135,7 +134,7 @@ fn sway_blocking() -> Result<Vec<Window>> {
             queue.push_back(child);
         }
 
-        if node.pid.is_some() && node.visible.unwrap_or(false) {
+        if node.pid.is_some() && node.visible.unwrap_or(false) && (!active || node.focused) {
             out.push(Window::Sway(node));
         }
     }
@@ -145,15 +144,22 @@ fn sway_blocking() -> Result<Vec<Window>> {
 
 #[cfg(feature = "sway")]
 #[instrument(level = "error", skip_all)]
-async fn sway() -> Result<Vec<Window>> {
-    spawn_blocking(sway_blocking).await?
+async fn sway(active: bool) -> Result<Vec<Window>> {
+    spawn_blocking(move || sway_blocking(active)).await?
 }
 
 
 #[cfg(feature = "hyprland")]
 #[instrument(level = "error", skip_all)]
-async fn hyprland() -> Result<Vec<Window>> {
-    let clients = Clients::get_async();
+async fn hyprland(active: bool) -> Result<Vec<Window>> {
+    let clients = async {
+        if active {
+            println!("{:?}", Client::get_active_async().await?);
+            Ok(Client::get_active_async().await?.into_iter().collect::<Vec<_>>())
+        } else {
+            Ok(Clients::get_async().await?.into_iter().collect())
+        }
+    };
     let monitors = Monitors::get_async();
     let workspaces = Workspaces::get_async();
 
@@ -203,7 +209,7 @@ async fn hyprland() -> Result<Vec<Window>> {
 // Tries hyprland and sway
 // Returns windows top to bottom, or at least first to last in terms of what must be matched
 #[instrument(level = "error", skip_all)]
-pub async fn visible_windows() -> Result<Vec<Window>> {
+pub async fn visible_windows(active_only: bool) -> Result<Vec<Window>> {
     let make_err = || eyre!("No connection could be made");
     let mut err: Option<Report> = None;
     let mut extend_err = |head: &'static str, e: Report| {
@@ -214,12 +220,12 @@ pub async fn visible_windows() -> Result<Vec<Window>> {
 
 
     #[cfg(feature = "hyprland")]
-    let (hyprland, mut try_hyprland) = (hyprland(), true);
+    let (hyprland, mut try_hyprland) = (hyprland(active_only), true);
     #[cfg(not(feature = "hyprland"))]
     let (hyprland, mut try_hyprland) = (pending(), false);
 
     #[cfg(feature = "sway")]
-    let (sway, mut try_sway) = (sway(), true);
+    let (sway, mut try_sway) = (sway(active_only), true);
     #[cfg(not(feature = "sway"))]
     let (sway, mut try_sway) = (pending(), false);
 

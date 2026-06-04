@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Deserializer};
@@ -11,7 +11,6 @@ pub enum Reformatter {
     Format(String),
     Delegate(PathBuf),
 }
-
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)] // Break if both format and delegate are defined
@@ -31,27 +30,46 @@ pub struct Override {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitorPosition {
+    pub id: String,
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileFormat {
+    #[default]
+    Png,
+    Webp,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub screenshot_dir: PathBuf,
 
     pub fallback: String,
 
     #[serde(default)]
-    pub overrides: Vec<Override>,
-
-    #[serde(default)]
     pub ignored_parents: Vec<String>,
 
-    pub compression: usize,
+    #[serde(default)]
+    pub format: FileFormat,
+
+    pub compression: u8,
 
     #[serde(default, deserialize_with = "empty_path_is_none")]
     pub callback: Option<PathBuf>,
 
-    #[serde(default, deserialize_with = "empty_path_is_none")]
-    pub slurp: Option<PathBuf>,
-
     #[serde(default)]
     pub timeout: u64,
+
+    #[serde(default)]
+    pub monitor_positions: Vec<MonitorPosition>,
+
+    #[serde(default)]
+    pub overrides: Vec<Override>,
 }
 
 
@@ -69,22 +87,10 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     let (config, _) =
         awconf::load_config::<Config>("screenshotter", OPTIONS.awconf.as_ref(), None::<&str>)
             .expect("Error loading config");
-    assert!(
-        config.screenshot_dir.is_absolute(),
-        "Screenshot directory {:?} is not absolute",
-        config.screenshot_dir
-    );
-    assert!(
-        config.screenshot_dir.is_dir(),
-        "Screenshot directory {:?} is not a directory",
-        config.screenshot_dir
-    );
+
+    let dir = &config.screenshot_dir;
+    assert!(dir.is_absolute(), "Screenshot directory {dir:?} is not absolute",);
+    assert!(dir.is_dir(), "Screenshot directory {dir:?} is not a directory",);
 
     config
-});
-
-pub static SLURP: LazyLock<&'static Path> = LazyLock::new(|| {
-    let slurp = CONFIG.slurp.as_deref().unwrap_or_else(|| Path::new("slurp"));
-    trace!("Slurp command: {slurp:?}");
-    slurp
 });

@@ -1,16 +1,5 @@
 use std::cell::OnceCell;
-use std::ffi::{CString, c_void};
-use std::os::fd::{BorrowedFd, RawFd};
-use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use color_eyre::Result;
-use color_eyre::eyre::{OptionExt, bail};
-use image::{DynamicImage, Rgb, RgbImage, RgbaImage};
-use libc::{MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE, close, ftruncate, shm_open, shm_unlink};
-use nix::errno::Errno;
-use wayland_client::{Dispatch, NoopIgnore};
-use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
@@ -23,9 +12,6 @@ use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
-use crate::util::MRegion;
-use crate::wayland::buffer::Buffer;
-use crate::wayland::{Format, State};
 
 #[derive(Debug, Default)]
 pub struct Protos {

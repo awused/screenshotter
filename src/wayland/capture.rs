@@ -1,12 +1,11 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
-use std::mem::swap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use color_eyre::eyre::{bail, eyre};
-use image::{DynamicImage, RgbImage};
+use image::RgbImage;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use wayland_client::{Dispatch, NoopIgnore};
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::{
@@ -81,8 +80,8 @@ impl Capture {
             // This is appreciably faster in parallel, to the point where it's almost not necessary
             // to have a fast path.
 
-            let mut width = monitor.physical.width;
-            let mut height = monitor.physical.height;
+            let width = monitor.physical.width;
+            let height = monitor.physical.height;
 
             out.rows_mut().enumerate().par_bridge().for_each(|(y, row)| {
                 row.enumerate().for_each(|(x, p)| {
@@ -128,7 +127,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, State> for OutputKey {
             }
 
             match event {
-                Event::BufferSize { mut width, mut height } => {
+                Event::BufferSize { width, height } => {
                     capture
                         .res
                         .set((width.try_into()?, height.try_into()?))
