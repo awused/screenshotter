@@ -87,6 +87,7 @@ enum Status {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Mode {
     ScreenshotOnly,
+    // TODO -- decide if I want to freeze output for Print mode or only use magnifier.
     Region(bool),
     PickWindow,
 }

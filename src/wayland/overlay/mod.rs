@@ -142,7 +142,8 @@ impl Overlay {
 
         // TODO - it'd be faster to keep and reuse a single tiny transparent buffer for when
         // nothing is visible
-        if high.draw(rect) || index != self.last_highlight.0 {
+        if high.draw(rect, index != self.last_highlight.0) {
+            assert!(high.locked);
             // Could be smarter here, likely does not matter.
             self.overlay_surface.attach(Some(&high.buffer.wl_buffer), 0, 0);
             self.overlay_surface.damage(0, 0, w, h);

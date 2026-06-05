@@ -56,7 +56,9 @@ enum Command {
     /// Intended for debugging configs.
     Name,
     /// Pick a region and output it to stdout, in the same format as slurp.
-    Print {
+    /// Screenshotter works in physical pixels, but this output is in logical pixels, so it may not
+    /// match perfectly with slurp when a physical pixel overlaps several logical pixels.
+    PrintRegion {
         /// Force the selection to be one of the existing windows.
         /// Same as slurp -r
         #[arg(short, long)]
@@ -112,7 +114,7 @@ async fn main() -> Result<()> {
         Command::Desktop { unscaled } => desktop(*unscaled).await,
         Command::Region => region().await,
         Command::Name => name().await,
-        Command::Print { windows_only } => print_region(*windows_only).await,
+        Command::PrintRegion { windows_only } => print_region(*windows_only).await,
         Command::Prop => prop().await,
         Command::VisibleWindows => visible().await,
     }
@@ -239,7 +241,7 @@ async fn name() -> Result<()> {
 #[instrument(level = "error", skip_all)]
 async fn print_region(windows_only: bool) -> Result<()> {
     trace!("Starting window position");
-    let mode = if windows_only { Mode::PickWindow } else { Mode::Region(false) };
+    let mode = if windows_only { Mode::PickWindow } else { Mode::Region(true) };
     let mut con = Conn::init(mode)?;
     let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
 
@@ -328,7 +330,7 @@ impl Command {
             Self::Desktop { .. } => "desktop",
             Self::Region => "region",
             Self::Name => "name",
-            Self::Print { .. } => "print",
+            Self::PrintRegion { .. } => "print",
             Self::Prop => "prop",
             Self::VisibleWindows => "visible_windows",
         }

@@ -22,16 +22,15 @@ pub struct Highlight {
 
 impl Highlight {
     // Region is in buffer coordinates
-    pub fn draw(&mut self, region: Option<MRegion>) -> bool {
-        if region == self.drawn {
-            return false;
-        }
+    pub fn draw(&mut self, region: Option<MRegion>, force: bool) -> bool {
+        assert!(!self.locked, "Tried to write to locked buffer, should not happen");
 
-        if self.locked {
-            error!("Tried to write to locked buffer, should not happen");
-            return false;
+        if region == self.drawn {
+            self.locked = force;
+            return force;
         }
         self.locked = true;
+
 
         // For now just be lazy and only handle 32bit pixels
         assert!(self.buffer.format.size() == 4);

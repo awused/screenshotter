@@ -177,6 +177,8 @@ impl LFRegion {
         }
     }
 
+    // Includes every logical pixel with even a partial overlap.
+    // Not really suitable for internal use.
     pub fn int_region(&self) -> LRegion {
         let left = self.x.floor() as i32;
         let right = (self.x + self.width).ceil() as i32;
