@@ -161,9 +161,8 @@ monitor_positions = [
 # but false or absent will result in a flatter structure (appname/2019-02/).
 #
 # format: Optional printf style format string.
-# TODO -- update this
-# The output pattern as a format string. Use %s to
-# reference the groups from the regex match, if present. All special
+# The output pattern as a format string. Use {index}s to
+# reference capture groups from the regex match, if present. All special
 # characters will be escaped, and this cannot be used to specify nested
 # directories.
 #
@@ -181,6 +180,14 @@ monitor_positions = [
 # Screenshotter makes the assumption that this callback does NOT rename or move
 # the screenshot.
 # This is not considered when matching overrides.
+#
+# Regex/format example.
+# The 2nd capture group (index 1) contains the mode and arguments for screenshotter.
+# Any invalid indices will be written as-is.
+# [[overrides]]
+#  regex = "screenshotter (.*)$"
+#  format = "screenshotter-mode-{1}"
+#
 [[overrides]]
   name = "vimx"
   format = "vim"

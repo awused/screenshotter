@@ -24,7 +24,7 @@ use tokio::task::{JoinHandle, spawn_blocking};
 
 use crate::config::{CONFIG, FileFormat, Override, Reformatter};
 use crate::wayland::Selected;
-use crate::{ENV_VARS, TIME};
+use crate::{ENV_VARS, OPTIONS, TIME};
 
 
 const PREFIX: &str = "SCREENSHOTTER_";
@@ -68,6 +68,11 @@ impl Application {
                 TIME.format(format_description!("[year]-[month]-[day]_[hour]-[minute]-[second]"))?,
             )
         };
+
+        if OPTIONS.dry_run {
+            info!("Dry run, would have written to {path:?}");
+            return Ok(path);
+        }
 
         DirBuilder::new().recursive(true).mode(0o755).create(path.parent().unwrap())?;
 

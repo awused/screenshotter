@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::thread::available_parallelism;
 
 use clap::Parser;
 use color_eyre::Result;
-use color_eyre::eyre::bail;
+use color_eyre::eyre::{OptionExt, bail};
 use futures::future::{Either, select};
 use notify_rust::{Notification, Urgency};
 use rayon::ThreadPoolBuilder;
@@ -31,10 +31,11 @@ mod ipc;
 mod util;
 mod wayland;
 
-const CLICK_TIME_MS: u32 = 100;
+const CLICK_TIME_MS: u32 = 200;
 
 pub static TIME: LazyLock<OffsetDateTime> =
     LazyLock::new(|| OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc()));
+
 
 #[derive(Debug, Parser)]
 enum Command {
@@ -54,6 +55,13 @@ enum Command {
     /// Gets the output name and directory for a screenshot without actually taking the screenshot.
     /// Intended for debugging configs.
     Name,
+    /// Pick a region and output it to stdout, in the same format as slurp.
+    Print {
+        /// Force the selection to be one of the existing windows.
+        /// Same as slurp -r
+        #[arg(short, long)]
+        windows_only: bool,
+    },
     /// Behaves roughly like xprop with json output.
     /// Output is compositor dependent and should match hypctrl -j clients or equivalent.
     Prop,
@@ -74,6 +82,10 @@ pub struct Opt {
     #[arg(short, long, value_parser)]
     /// Override the selected config.
     awconf: Option<PathBuf>,
+
+    /// Do not save the final image, create directories, or run callbacks
+    #[arg(short, long, global = true)]
+    dry_run: bool,
 
     #[command(subcommand)]
     cmd: Command,
@@ -100,6 +112,7 @@ async fn main() -> Result<()> {
         Command::Desktop { unscaled } => desktop(*unscaled).await,
         Command::Region => region().await,
         Command::Name => name().await,
+        Command::Print { windows_only } => print_region(*windows_only).await,
         Command::Prop => prop().await,
         Command::VisibleWindows => visible().await,
     }
@@ -132,9 +145,9 @@ async fn window() -> Result<()> {
 
     let app = app.await??;
 
-    app.save_file(combined)?;
+    let path = app.save_file(combined)?;
 
-    Ok(())
+    notify(&path)
 }
 
 #[instrument(level = "error", skip_all)]
@@ -156,9 +169,9 @@ async fn desktop(unscaled: bool) -> Result<()> {
 
     let app = app.await??;
 
-    app.save_file(combined)?;
+    let path = app.save_file(combined)?;
 
-    Ok(())
+    notify(&path)
 }
 
 #[instrument(level = "error", skip_all)]
@@ -168,7 +181,7 @@ async fn region() -> Result<()> {
 
     init_threadpool();
 
-    let mut con = Conn::init(Mode::Region)?;
+    let mut con = Conn::init(Mode::Region(true))?;
     let finder = app::Finder::init();
     let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
 
@@ -184,9 +197,9 @@ async fn region() -> Result<()> {
 
     let app = app.await??;
 
-    app.save_file(combined)?;
+    let path = app.save_file(combined)?;
 
-    Ok(())
+    notify(&path)
 }
 
 
@@ -219,6 +232,21 @@ async fn name() -> Result<()> {
         .urgency(Urgency::Low)
         .show()?;
 
+
+    Ok(())
+}
+
+#[instrument(level = "error", skip_all)]
+async fn print_region(windows_only: bool) -> Result<()> {
+    trace!("Starting window position");
+    let mode = if windows_only { Mode::PickWindow } else { Mode::Region(false) };
+    let mut con = Conn::init(mode)?;
+    let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
+
+    let selection = con.run(windows).await?;
+
+    let region = selection.int_region().ok_or_eyre("No region selected")?;
+    println!("{region}");
 
     Ok(())
 }
@@ -270,6 +298,28 @@ async fn while_polling<T>(fut: impl Future<Output = Result<T>>, con: &mut Conn) 
     }
 }
 
+fn notify(path: &Path) -> Result<()> {
+    let rel_path = path.strip_prefix(&CONFIG.screenshot_dir).unwrap_or(path);
+
+    let summary = if !OPTIONS.dry_run { "Screenshot Taken" } else { "Screenshot Dry Run" };
+
+    let mut notify = Notification::new();
+    notify
+        .summary(summary)
+        .appname("screenshotter")
+        .body(&rel_path.to_string_lossy())
+        .urgency(Urgency::Low);
+
+    if !OPTIONS.dry_run
+        && let Some(path) = path.to_str()
+    {
+        notify.image_path(path);
+    }
+
+    notify.show()?;
+    Ok(())
+}
+
 
 impl Command {
     const fn str(&self) -> &'static str {
@@ -278,6 +328,7 @@ impl Command {
             Self::Desktop { .. } => "desktop",
             Self::Region => "region",
             Self::Name => "name",
+            Self::Print { .. } => "print",
             Self::Prop => "prop",
             Self::VisibleWindows => "visible_windows",
         }

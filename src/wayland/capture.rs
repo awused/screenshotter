@@ -1,7 +1,6 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use color_eyre::eyre::{bail, eyre};
@@ -34,10 +33,6 @@ pub struct Capture {
 
     pub done: bool,
 }
-
-// TODO -- remove, this is for testing
-static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
-
 
 impl Capture {
     pub fn transformed_res(&self) -> Option<(i32, i32)> {
@@ -98,9 +93,6 @@ impl Capture {
         }
 
         debug!("Read {}x{} image in {:?}", region.width, region.height, start.elapsed());
-
-        out.save(format!("/tmp/screenshotter/{}.pnm", NEXT_FILE.fetch_add(1, Ordering::Relaxed)))
-            .unwrap();
 
         out
     }

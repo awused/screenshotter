@@ -124,7 +124,7 @@ impl Conn {
             bail!("No monitors detected");
         }
 
-        // Force a pointer frame now, to make it highlight things if it wasn't.
+        // Force a full pointer frame now, to make it highlight things if it wasn't.
         if self.state.mode.sel() {
             self.state.pointer_frame(&self.queue.handle());
         }
@@ -342,7 +342,7 @@ impl Dispatch<WlCallback, State> for Global {
         // state.format.get().unwrap();
 
         state.try_handle(|state| {
-            if state.mode == Mode::Region {
+            if state.mode.magnifier() {
                 let buffer = magnifier::draw_crosshair(state, qhandle)?;
                 state.magnifier_crosshairs.set(buffer.into()).unwrap();
             }
@@ -404,7 +404,7 @@ impl Dispatch<WlKeyboard, State> for Global {
         _proxy: &WlKeyboard,
         event: <WlKeyboard as Proxy>::Event,
         _conn: &Connection,
-        _qhandle: &QueueHandle<State>,
+        qh: &QueueHandle<State>,
     ) {
         // debug!("WlKeyboard: {event:?}");
         use wl_keyboard::Event;
@@ -434,10 +434,9 @@ impl Dispatch<WlKeyboard, State> for Global {
                         state.keystate = Some(XkbState::new(&keymap));
                     }
                 }
-                Event::Key { serial, time: _, key, state: key_state } => {
-                    // TODO -- consider Enter as an alternative click
-                    if key_state == KeyState::Pressed {
-                        state.handle_key(serial, key)?;
+                Event::Key { serial, time, key, state: key_state } => {
+                    if key_state == KeyState::Pressed || key_state == KeyState::Repeated {
+                        state.key_down(qh, time, serial, key)?;
                     }
                 }
                 Event::Modifiers {

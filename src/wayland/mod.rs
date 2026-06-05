@@ -11,12 +11,12 @@ use wayland_client::protocol::wl_pointer::{ButtonState, WlPointer};
 use wayland_client::protocol::wl_shm::{self};
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{NoopIgnore, QueueHandle};
-use xkbcommon::xkb::{Keycode, Keysym, State as XkbState};
+use xkbcommon::xkb::{Keycode, Keysym, MOD_NAME_SHIFT, STATE_MODS_EFFECTIVE, State as XkbState};
 
 use crate::CLICK_TIME_MS;
 use crate::img::Screenshot;
 use crate::ipc::Window;
-use crate::util::{LFRegion, LRegion, MLPoint};
+use crate::util::{LFRegion, LPoint, LRegion, MLPoint};
 use crate::wayland::buffer::Buffer;
 use crate::wayland::magnifier::Magnifier;
 use crate::wayland::output::Output;
@@ -87,7 +87,7 @@ enum Status {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Mode {
     ScreenshotOnly,
-    Region,
+    Region(bool),
     PickWindow,
 }
 
@@ -95,20 +95,21 @@ impl Mode {
     pub const fn sel(self) -> bool {
         match self {
             Self::ScreenshotOnly => false,
-            Self::Region | Self::PickWindow => true,
+            Self::Region(_) | Self::PickWindow => true,
         }
     }
 
     pub const fn shot(self) -> bool {
         match self {
-            Self::ScreenshotOnly | Self::Region => true,
+            Self::Region(shoot) => shoot,
+            Self::ScreenshotOnly => true,
             Self::PickWindow => false,
         }
     }
 
     pub const fn magnifier(self) -> bool {
         match self {
-            Self::Region => true,
+            Self::Region(_) => true,
             Self::ScreenshotOnly | Self::PickWindow => false,
         }
     }
@@ -159,6 +160,12 @@ pub enum SelectState {
         // For if this is determined to be a normal click
         initial_window: Option<usize>,
     },
+}
+
+impl SelectState {
+    pub const fn dragging(&self) -> bool {
+        matches!(self, Self::Dragging { .. })
+    }
 }
 
 struct State {
@@ -451,6 +458,65 @@ impl State {
         });
     }
 
+    fn drag_start(&mut self, time: u32) {
+        let initial_window = match (&self.select_state, self.mode) {
+            (_, Mode::ScreenshotOnly) | (SelectState::Hovering, Mode::PickWindow) => return,
+            (SelectState::Dragging { .. }, _) => {
+                debug!("Got left button press or enter while dragging. Ignoring.");
+                return;
+            }
+            (SelectState::OverWindow(i), Mode::PickWindow) => {
+                debug!("Mouse down or enter on window, selecting");
+                self.status = Status::Done(Selected::Window(self.windows.swap_remove(*i)));
+                return;
+            }
+            (SelectState::Hovering, Mode::Region(_)) => None,
+            (SelectState::OverWindow(i), Mode::Region(_)) => Some(*i),
+        };
+
+
+        let Some(Hover { outkey, corrected, .. }) = self.mouse.hover else {
+            error!("Mouse down or enter outside of surface. This should never happen.");
+            return;
+        };
+        if outkey != corrected {
+            error!("Got mouse down or enter while correcting output, this is weird.");
+            return;
+        }
+
+        let start_pixel = self.outputs[&outkey].monitor.global_pixel_bounds(self.mouse.point);
+        debug!("Drag started at {start_pixel:?}");
+
+        self.select_state = SelectState::Dragging {
+            start_pixel,
+            region: start_pixel,
+            start_time: time,
+            initial_window,
+        }
+    }
+
+    fn drag_end(&mut self, qh: &QueueHandle<Self>, time: u32) {
+        let SelectState::Dragging { region, start_time, initial_window, .. } = self.select_state
+        else {
+            return;
+        };
+        if time.wrapping_sub(start_time) <= CLICK_TIME_MS {
+            if let Some(i) = initial_window {
+                self.status = Status::Done(Selected::Window(self.windows.swap_remove(i)));
+            } else {
+                warn!("Click outside of window, ignoring.");
+                self.select_state = SelectState::Hovering;
+                self.update_overlay(qh);
+            }
+        } else {
+            self.status =
+                Status::Done(region.best_window(&mut self.windows).map_or_else(
+                    || Selected::Region(region),
+                    |w| Selected::RegionWindow(region, w),
+                ));
+        }
+    }
+
     fn pointer_button(
         &mut self,
         qh: &QueueHandle<Self>,
@@ -459,8 +525,8 @@ impl State {
         b_state: ButtonState,
     ) {
         if button == BTN_RIGHT!() {
-            if let SelectState::Dragging { .. } = self.select_state {
-                debug!("Right mouse button cancelling drag.");
+            if self.select_state.dragging() {
+                debug!("Right mouse button, cancelling drag.");
                 self.select_state = SelectState::Hovering;
             }
             return;
@@ -470,62 +536,19 @@ impl State {
 
 
         if b_state == ButtonState::Pressed {
-            let initial_window = match (&self.select_state, self.mode) {
-                (_, Mode::ScreenshotOnly) | (SelectState::Hovering, Mode::PickWindow) => return,
-                (SelectState::Dragging { .. }, _) => {
-                    debug!("Got left button press while dragging. Ignoring.");
-                    return;
-                }
-                (SelectState::OverWindow(i), Mode::PickWindow) => {
-                    debug!("Mouse down on window, selecting");
-                    self.status = Status::Done(Selected::Window(self.windows.swap_remove(*i)));
-                    return;
-                }
-                (SelectState::Hovering, Mode::Region) => None,
-                (SelectState::OverWindow(i), Mode::Region) => Some(*i),
-            };
-
-
-            let Some(Hover { outkey, corrected, .. }) = self.mouse.hover else {
-                error!("Mouse down outside of surface. This should never happen.");
-                return;
-            };
-            if outkey != corrected {
-                error!("Got mousedown while correcting output, this is weird.");
+            self.drag_start(time);
+        } else if b_state == ButtonState::Released {
+            if let Some(keystate) = &self.keystate
+                && keystate.mod_name_is_active(MOD_NAME_SHIFT, STATE_MODS_EFFECTIVE)
+            {
+                debug!("Shift held, not ending drag on mouse up");
                 return;
             }
-
-            let start_pixel = self.outputs[&outkey].monitor.global_pixel_bounds(self.mouse.point);
-            debug!("Drag started at {start_pixel:?}");
-
-            self.select_state = SelectState::Dragging {
-                start_pixel,
-                region: start_pixel,
-                start_time: time,
-                initial_window,
-            }
-        } else if b_state == ButtonState::Released
-            && let SelectState::Dragging { region, start_time, initial_window, .. } =
-                self.select_state
-        {
-            if time.wrapping_sub(start_time) <= CLICK_TIME_MS {
-                if let Some(i) = initial_window {
-                    self.status = Status::Done(Selected::Window(self.windows.swap_remove(i)));
-                } else {
-                    warn!("Click outside of window, ignoring.");
-                    self.select_state = SelectState::Hovering;
-                    self.update_overlay(qh);
-                }
-            } else {
-                self.status = Status::Done(region.best_window(&mut self.windows).map_or_else(
-                    || Selected::Region(region),
-                    |w| Selected::RegionWindow(region, w),
-                ));
-            }
+            self.drag_end(qh, time);
         }
     }
 
-    fn handle_key(&self, _serial: u32, key: u32) -> Result<()> {
+    fn key_down(&mut self, qh: &QueueHandle<Self>, time: u32, serial: u32, key: u32) -> Result<()> {
         let Some(ref keystate) = self.keystate else {
             warn!("Got key press with no keymap, treating as escape");
             bail!("Cancelled");
@@ -533,28 +556,79 @@ impl State {
 
         let key = keystate.key_get_one_sym(Keycode::new(key + 8));
 
-        debug!("Keysym: {key:?}");
+        debug!("Keysym down: {key:?}");
         match key {
             Keysym::Escape | Keysym::Q | Keysym::q => {
                 bail!("Cancelled");
             }
-            // Keysym::Up => {
-            // TODO -- implement warping in all four directions and enter as click
-            // maybe even key repeats (seems a bit annoying to do)?
-            // if let Some(warp) = self.protos.pointer_warp.get() {
-            //     warp.warp_pointer(
-            //         &self.mouse.hover.as_ref().unwrap().entered,
-            //         self.pointer.get().unwrap(),
-            //         -1.0,
-            //         -1.0,
-            //         serial,
-            //     );
-            // };
-            // }
+            Keysym::BackSpace => {
+                if self.select_state.dragging() {
+                    self.select_state = SelectState::Hovering;
+                }
+
+                self.update_hover(qh, None);
+            }
+            Keysym::P | Keysym::p => {
+                // Select region, only if hovering over one
+                if let SelectState::OverWindow(i) = self.select_state {
+                    info!("Selecting current window");
+                    self.status = Status::Done(Selected::Window(self.windows.swap_remove(i)));
+                }
+            }
+            Keysym::Return | Keysym::KP_5 | Keysym::space => {
+                if self.select_state.dragging() {
+                    self.drag_end(qh, time);
+                } else {
+                    // Never count this as a click
+                    self.drag_start(time.wrapping_sub(CLICK_TIME_MS + 1));
+                    self.update_overlay(qh);
+                }
+            }
+            Keysym::Up | Keysym::KP_Up | Keysym::KP_8 => self.warp_pointer(serial, 0, -1),
+            Keysym::Down | Keysym::KP_Down | Keysym::KP_2 => self.warp_pointer(serial, 0, 1),
+            Keysym::Left | Keysym::KP_Left | Keysym::KP_4 => self.warp_pointer(serial, -1, 0),
+            Keysym::Right | Keysym::KP_Right | Keysym::KP_6 => self.warp_pointer(serial, 1, 0),
+            Keysym::KP_Home | Keysym::KP_7 => self.warp_pointer(serial, -1, -1),
+            Keysym::KP_Page_Up | Keysym::KP_9 => self.warp_pointer(serial, 1, -1),
+            Keysym::KP_End | Keysym::KP_1 => self.warp_pointer(serial, -1, 1),
+            Keysym::KP_Page_Down | Keysym::KP_3 => self.warp_pointer(serial, 1, 1),
             _ => {}
         }
 
         Ok(())
+    }
+
+    // TODO -- Does not work when dragging outside of the surface
+    fn warp_pointer(&self, serial: u32, dx: i32, dy: i32) {
+        (|| -> Option<()> {
+            let warp = self.protos.pointer_warp.get()?;
+            let hover = self.mouse.hover.as_ref()?;
+            let pointer = self.pointer.get()?;
+
+            trace!("Warping by {dx} {dy}");
+            let point = self.mouse.point;
+
+            let output = &self.outputs[&hover.outkey];
+            let global = output.monitor.local_to_global(self.mouse.point);
+
+            let pixel = if hover.outkey == hover.corrected {
+                output.monitor.global_pixel_bounds(point)
+            } else {
+                let true_output = &self.outputs[&hover.corrected];
+                let local = true_output.monitor.global_to_local(global);
+                true_output.monitor.global_pixel_bounds(local)
+            };
+
+            // +0.5 to hit the center of the target pixel, not the corner
+            let x = pixel.width.mul_add(0.5 + dx as f64, pixel.x);
+            let y = pixel.height.mul_add(0.5 + dy as f64, pixel.y);
+
+            let MLPoint { x, y } = output.monitor.global_to_local(LPoint { x, y });
+
+
+            warp.warp_pointer(&hover.entered, pointer, x, y, serial);
+            None
+        })();
     }
 
     #[instrument(level = "error", skip_all)]

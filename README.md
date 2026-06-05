@@ -50,6 +50,17 @@ The `name` mode does not take a screenshot and can be used to ensure that your c
 
 The `prop` mode outputs json on stdout and can be used as a "swayprop" or "hyprprop" command. It does a better job at selecting the visible portion of the active window provided my fork of slurp is also used.
 
+## Wayland Keyboard Controls
+
+* `Escape/Q` - Exit
+* `P/Left click` - Select the current highlighted window
+* `Left click and hold` - Drag to select a region
+* `Backspace/Right Click` - Cancel a drag
+* `Shift+Left Click` - Start a drag without requiring left mouse to be held down
+  * Holding `Shift` while releasing the left mouse button will not finish the selection
+* `Enter/Space/Numpad 5` - Start or stop dragging
+* `Arrow Keys/Numpad` - Move the mouse one pixel at a time
+
 # Configuration
 
 Most of the configuration in screenshotter.toml is straightforward but overrides and ignored parents can get complicated.
