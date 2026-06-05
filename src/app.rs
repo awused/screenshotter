@@ -22,7 +22,7 @@ use time::macros::format_description;
 use tokio::process::Command;
 use tokio::task::{JoinHandle, spawn_blocking};
 
-use crate::config::{CONFIG, FileFormat, Override, Reformatter};
+use crate::config::{CONFIG, FileFormat, Override};
 use crate::wayland::Selected;
 use crate::{ENV_VARS, OPTIONS, TIME};
 
@@ -192,20 +192,16 @@ impl Finder {
             let (name, cmd, pid) = get_process(system, name, pid as u32);
             cli = cmd;
 
-            let mut dir = CONFIG.screenshot_dir.clone();
-            dir.push(&name);
             application.relative_dir = name.clone().into();
+            env.insert(DIR, CONFIG.screenshot_dir.join(&name).into());
             env.insert(NAME, name);
-            env.insert(DIR, dir.into());
             env.insert(PID, pid.to_string().into());
             env.insert(WINDOW_ID, window.id().into());
         } else {
             let name = convert_application_name(&CONFIG.fallback);
             application.relative_dir = name.clone().into();
-            env.insert(NAME, name.clone().into());
-            let mut dir = CONFIG.screenshot_dir.clone();
-            dir.push(name);
-            env.insert(DIR, dir.into());
+            env.insert(DIR, CONFIG.screenshot_dir.join(&name).into());
+            env.insert(NAME, name.into());
         }
 
         // Delegates _could_ take a long time to run, could parallelize them.
@@ -222,10 +218,7 @@ impl Finder {
 
                 let mut env = ENV_VARS.lock().unwrap();
                 env.insert(NAME, application.relative_dir.clone().into());
-
-                let mut dir = CONFIG.screenshot_dir.clone();
-                dir.push(&application.relative_dir);
-                env.insert(DIR, dir.into());
+                env.insert(DIR, CONFIG.screenshot_dir.join(&application.relative_dir).into());
             }
 
             application.yearly = over.yearly;
@@ -317,27 +310,33 @@ async fn check_override(
         None
     };
 
-    // Delegate exiting with a failure is not fatal, but means it didn't match
 
-    let mut dir = None;
-
-    match &over.transform {
-        Some(Reformatter::Format(template)) => {
-            let new_name = strfmt_map(template, |mut f| {
-                if let Some(caps) = &caps
-                    && let Ok(g) = f.key.parse::<usize>()
-                    && let Some(caps) = caps.get(g)
-                {
-                    f.str(&OsStr::from_bytes(caps.as_bytes()).to_string_lossy())
-                } else {
-                    error!("Bad formatting identifier: \"{}\"", f.key);
-                    f.skip()
-                }
-            })?;
-
-            dir = Some(convert_application_name(&new_name).into());
+    let mut dir = if let Some(template) = &over.format {
+        let new_name = strfmt_map(template, |mut f| {
+            if let Some(caps) = &caps
+                && let Ok(g) = f.key.parse::<usize>()
+                && let Some(caps) = caps.get(g)
+            {
+                f.str(&OsStr::from_bytes(caps.as_bytes()).to_string_lossy())
+            } else {
+                error!("Bad formatting identifier: \"{}\"", f.key);
+                f.skip()
+            }
+        })?;
+        let new_name = convert_application_name(&new_name);
+        if new_name.is_empty() {
+            error!("Invalid format \"{template}\" produced empty string");
+            return Ok((false, None));
         }
-        Some(Reformatter::Delegate(delegate)) => match run_delegate(delegate).await {
+
+        Some(new_name.into())
+    } else {
+        None
+    };
+
+    // Delegate exiting with a failure is not fatal, but means it didn't match
+    if let Some(delegate) = &over.delegate {
+        match run_delegate(delegate, dir.as_deref()).await {
             Ok(Some(path)) => {
                 debug!("Delegate matched with output: {path:?}");
                 dir = Some(path);
@@ -349,8 +348,7 @@ async fn check_override(
                 debug!("Delegate didn't match");
                 return Ok((false, None));
             }
-        },
-        None => {}
+        }
     }
 
     Ok((true, dir))
@@ -358,12 +356,18 @@ async fn check_override(
 
 #[instrument(level = "error", skip_all, err(level = "debug", Debug))]
 #[allow(clippy::await_holding_lock)] // false positive
-async fn run_delegate(delegate: &Path) -> Result<Option<PathBuf>> {
+async fn run_delegate(delegate: &Path, dir: Option<&Path>) -> Result<Option<PathBuf>> {
     let env = ENV_VARS.lock().unwrap();
     trace!("Running delegate with env: {:#?}", env);
 
     let mut cmd = Command::new(delegate);
     cmd.envs(env.iter());
+
+    if let Some(dir) = dir {
+        cmd.env(NAME, dir);
+        cmd.env(DIR, CONFIG.screenshot_dir.join(dir));
+    }
+
     drop(env);
     let output = cmd.output().await?;
 

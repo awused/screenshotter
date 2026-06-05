@@ -6,21 +6,18 @@ use serde::{Deserialize, Deserializer};
 use crate::OPTIONS;
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Reformatter {
-    Format(String),
-    Delegate(PathBuf),
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)] // Break if both format and delegate are defined
 pub struct Override {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub regex: Option<String>,
-    #[serde(default, flatten)]
-    pub transform: Option<Reformatter>,
+
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub delegate: Option<PathBuf>,
+
     #[serde(default)]
     pub yearly: bool,
     #[serde(default)]

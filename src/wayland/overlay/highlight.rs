@@ -36,14 +36,15 @@ impl Highlight {
         // For now just be lazy and only handle 32bit pixels
         assert!(self.buffer.format.size() == 4);
 
-        // TODO[HDR] -- this assumes Argb8888
-        if let Some(drawn) = &self.drawn.take() {
-            // Could skip this if drawn fits inside the new region
+        if let Some(drawn) = &self.drawn.take()
+            && region.is_none_or(|new| !new.fully_contains(drawn))
+        {
             unsafe {
                 self.rect(drawn, 0, 0);
             }
         }
 
+        // TODO[HDR] -- this assumes Argb8888
         if let Some(drawn) = region {
             unsafe {
                 self.rect(

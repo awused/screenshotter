@@ -249,6 +249,13 @@ impl MRegion {
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
+
+    pub fn fully_contains(&self, other: &Self) -> bool {
+        self.x <= other.x
+            && self.x + self.width >= other.x + other.width
+            && self.y <= other.y
+            && self.y + self.height >= other.y + other.height
+    }
 }
 
 #[derive(Debug)]

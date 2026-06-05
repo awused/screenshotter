@@ -9,6 +9,7 @@ Wayland version:
 * Sway or Hyprland
 * Works as a replacement for common `swayprop` and `hyprprop` scripts, handling more edge cases.
 * Does *not* require slurp or grim.
+* Does *not* work well with multiplexing terminals.
 * As of 2026-05 the Wayland ecosystem is not in a a great state.
 
 Terminal emulators or other multiplexers that have multiple windows with the same process and children are not well supported on Wayland.
