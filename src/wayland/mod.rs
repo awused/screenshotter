@@ -576,7 +576,7 @@ impl State {
                     self.status = Status::Done(Selected::Window(self.windows.swap_remove(i)));
                 }
             }
-            Keysym::Return | Keysym::KP_5 | Keysym::space => {
+            Keysym::Return | Keysym::KP_5 | Keysym::KP_Begin | Keysym::space => {
                 if self.select_state.dragging() {
                     self.drag_end(qh, time);
                 } else {
@@ -734,7 +734,9 @@ impl Transform {
     }
 
     // (width, height) are physical as displayed to the user.
-    // a 1440p monitor with a rotation applied would be (1440, 2560)
+    // A 1440p monitor with a rotation applied would be (1440, 2560)
+    // Takes (x, y) as displayed to the user and translates it into buffer coordinates in the
+    // untransformed buffer.
     const fn correct(self, (x, y): (i32, i32), (width, height): (i32, i32)) -> (i32, i32) {
         match self.0.0 {
             1 => (y, width - x - 1),

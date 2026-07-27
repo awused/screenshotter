@@ -69,6 +69,8 @@ impl Application {
             )
         };
 
+        path.add_extension(CONFIG.format.extension());
+
         if OPTIONS.dry_run {
             info!("Dry run, would have written to {path:?}");
             return Ok(path);
@@ -79,7 +81,6 @@ impl Application {
         let start = Instant::now();
         match CONFIG.format {
             FileFormat::Png => {
-                path.add_extension("png");
                 let enc = PngEncoder::new_with_quality(
                     File::create_new(&path)?,
                     image::codecs::png::CompressionType::Level(CONFIG.compression),
@@ -88,16 +89,11 @@ impl Application {
                 combined.write_with_encoder(enc)?;
             }
             FileFormat::Webp => {
-                path.add_extension("webp");
                 let enc = WebPEncoder::new_lossless(File::create_new(&path)?);
                 combined.write_with_encoder(enc)?;
             }
         }
         info!("Saved file {path:?} in {:?}", start.elapsed());
-
-
-        debug!("Wrote file in {:?}", start.elapsed());
-
 
         if let Some(callback) = self.callback
             && let Err(e) = run_callback(callback, &path)

@@ -29,7 +29,7 @@ X11 version:
 
 # Installation
 
-The Go/X11 and Wayland/Rust versions use different configuration options, camelCase for go and snake_case for Rust. The configurations for both versions can exist in the same file to run both at once, but rename the X11 overrides array to OverrideX.
+The Go/X11 and Wayland/Rust versions use different configuration options, camelCase for go and snake_case for Rust. The configurations for both versions can exist in the same file to run both at once, but rename the X11 overrides array to OverridesX.
 
 ## Wayland (Sway/Hyprland)
 

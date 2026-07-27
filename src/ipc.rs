@@ -154,7 +154,6 @@ async fn sway(active: bool) -> Result<Vec<Window>> {
 async fn hyprland(active: bool) -> Result<Vec<Window>> {
     let clients = async {
         if active {
-            println!("{:?}", Client::get_active_async().await?);
             Ok(Client::get_active_async().await?.into_iter().collect::<Vec<_>>())
         } else {
             Ok(Clients::get_async().await?.into_iter().collect())

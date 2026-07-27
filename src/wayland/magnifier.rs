@@ -215,35 +215,34 @@ impl View {
 
         let inset = RES as i32 / 2;
 
-        // Could slightly optimizing drawing off-monitor area but probably not worth it
-        unsafe {
-            for y in 0..RES as i32 {
-                for x in 0..RES as i32 {
-                    let true_x = x - inset + self.origin.0;
-                    let true_y = y - inset + self.origin.1;
-                    let (true_x, true_y) = monitor.transform.correct(
-                        (true_x, true_y),
-                        (monitor.physical.width, monitor.physical.height),
-                    );
+        // Could slightly optimize drawing off-monitor area but probably not worth it
+        for y in 0..RES as i32 {
+            for x in 0..RES as i32 {
+                let true_x = x - inset + self.origin.0;
+                let true_y = y - inset + self.origin.1;
+                let (true_x, true_y) = monitor
+                    .transform
+                    .correct((true_x, true_y), (monitor.physical.width, monitor.physical.height));
 
-                    let pixel = if true_x >= 0
-                        && (true_x as usize) < frozen.width
-                        && true_y >= 0
-                        && (true_y as usize) < frozen.height
-                    {
-                        let offset = (true_y as usize) * frozen_stride + (true_x as usize) * bytes;
-                        debug_assert!(offset + bytes <= frozen.buf_size);
-                        slice::from_raw_parts(frozen.buf.cast::<u8>().add(offset), bytes)
-                    } else {
-                        // Works for rgba and bgr
-                        &[0, 0, 0, 255][0..bytes]
-                    };
+                let pixel = if true_x >= 0
+                    && (true_x as usize) < frozen.width
+                    && true_y >= 0
+                    && (true_y as usize) < frozen.height
+                {
+                    let offset = (true_y as usize) * frozen_stride + (true_x as usize) * bytes;
+                    debug_assert!(offset + bytes <= frozen.buf_size);
+                    unsafe { slice::from_raw_parts(frozen.buf.cast::<u8>().add(offset), bytes) }
+                } else {
+                    // Works for rgba and bgr
+                    &[0, 0, 0, 255][0..bytes]
+                };
 
-                    let start = (y as usize * stride + x as usize * bytes) * SCALE;
-                    for j in 0..SCALE {
-                        for i in 0..SCALE {
-                            let out = start + j * stride + i * bytes;
-                            debug_assert!(out + bytes <= self.buffer.buf_size);
+                let start = (y as usize * stride + x as usize * bytes) * SCALE;
+                for j in 0..SCALE {
+                    for i in 0..SCALE {
+                        let out = start + j * stride + i * bytes;
+                        debug_assert!(out + bytes <= self.buffer.buf_size);
+                        unsafe {
                             slice::from_raw_parts_mut(self.buffer.buf.cast::<u8>().add(out), bytes)
                                 .copy_from_slice(pixel);
                         }
@@ -264,7 +263,9 @@ pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buf
     let size = stride * LARGE_RES;
 
     // TODO -- support non-argb8888 formats. HDR10 has minimal transparency
-    let mut drawing = vec![0u8; size];
+    assert_eq!(size, buffer.buf_size);
+    let drawing = unsafe { slice::from_raw_parts_mut(buffer.buf.cast::<u8>(), size) };
+
     let pixel = [178, 178, 0, 178];
     assert_eq!(pixel.len(), format.size());
 
@@ -302,11 +303,6 @@ pub fn draw_crosshair(state: &State, qhandle: &QueueHandle<State>) -> Result<Buf
         drawing[start..start + pixel.len()].copy_from_slice(&pixel);
         let start = i * stride + stride - format.size();
         drawing[start..start + pixel.len()].copy_from_slice(&pixel);
-    }
-
-    unsafe {
-        assert_eq!(size, buffer.buf_size);
-        buffer.buf.copy_from_nonoverlapping(drawing.as_ptr().cast(), size);
     }
 
     Ok(buffer)

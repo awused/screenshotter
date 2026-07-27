@@ -31,8 +31,7 @@ pub struct Buffer {
     pub buf_size: usize,
 }
 
-// It's safe to access the buffer from multiple threads, but not if it's being written to on the
-// wayland end.
+// It's safe to access the buffer from multiple threads.
 unsafe impl Sync for Buffer {}
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -154,6 +153,8 @@ impl Buffer {
     }
 }
 
+// Destroy and close should be safe even if the buffer is locked, but a bit uncertain about munmap.
+// Probably safe but I haven't read deeply enough.
 impl Drop for Buffer {
     fn drop(&mut self) {
         unsafe {

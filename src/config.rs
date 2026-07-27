@@ -34,12 +34,21 @@ pub struct MonitorPosition {
     pub y: i32,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum FileFormat {
     #[default]
     Png,
     Webp,
+}
+
+impl FileFormat {
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Webp => "webp",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

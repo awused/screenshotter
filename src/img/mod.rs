@@ -16,7 +16,6 @@ pub struct Screenshot {
 
 impl Screenshot {
     pub fn output_region_unscaled(&self) -> ORegion {
-        println!("{}", self.monitor.description);
         let (x, y) = if let Some(pos) = CONFIG
             .monitor_positions
             .iter()
