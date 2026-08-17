@@ -850,6 +850,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "hyprland"
 version = "0.4.0-beta.3"
+source = "git+https://github.com/awused/hyprland-rs?branch=56#71689cc83dff79900e2808fac16fa8f264ebade5"
 dependencies = [
  "async-stream",
  "chardetng",
@@ -868,6 +869,7 @@ dependencies = [
 [[package]]
 name = "hyprland-macros"
 version = "0.4.0-beta.3"
+source = "git+https://github.com/awused/hyprland-rs?branch=56#71689cc83dff79900e2808fac16fa8f264ebade5"
 dependencies = [
  "proc-macro2",
  "quote",
