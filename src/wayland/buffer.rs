@@ -75,7 +75,7 @@ impl Buffer {
 
         match self.format {
             Format::Argb8888 => {
-                for (r, c) in row.chunks_exact_mut(3).zip(read.chunks_exact(4)) {
+                for (r, c) in row.as_chunks_mut::<3>().0.iter_mut().zip(read.as_chunks::<4>().0) {
                     r[0] = c[2];
                     r[1] = c[1];
                     r[2] = c[0];

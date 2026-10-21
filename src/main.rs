@@ -68,7 +68,6 @@ enum Command {
     /// Output is compositor dependent and should match hypctrl -j clients or equivalent.
     Prop,
     /// Dump data about all visible windows including their visible rectangles.
-    /// Only considers portions of
     /// Output is compositor dependent and should match hypctrl -j clients or equivalent.
     /// Windows should be ordered from front to back.
     /// `visible_region` will be in the form {x: int, y: int, width: int, height: int}
@@ -214,7 +213,6 @@ async fn name() -> Result<()> {
     let finder = app::Finder::init();
     let windows = while_polling(ipc::visible_windows(false), &mut con).await?;
 
-
     let selection = con.run(windows).await?;
     let Selected::Window(window) = selection else {
         bail!("No window selected");
@@ -233,7 +231,6 @@ async fn name() -> Result<()> {
         .body(&target)
         .urgency(Urgency::Low)
         .show()?;
-
 
     Ok(())
 }

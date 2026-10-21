@@ -248,7 +248,7 @@ fn horizontal_par_sample<const N: usize, const S: usize, K: Fn(f32) -> f32 + Syn
             }
             ws.iter_mut().for_each(|w| *w /= sum);
 
-            outcol.chunks_exact_mut(N).enumerate().for_each(|(y, chunk)| {
+            outcol.as_chunks_mut::<N>().0.iter_mut().enumerate().for_each(|(y, chunk)| {
                 let mut t = [0.0; N];
 
                 for (i, w) in ws.iter().enumerate() {
@@ -284,7 +284,6 @@ fn horizontal_par_sample<const N: usize, const S: usize, K: Fn(f32) -> f32 + Syn
                     _ => unreachable!(),
                 }
 
-
                 for i in 0..N {
                     chunk[i] = t[i].round() as u8;
                 }
@@ -299,7 +298,7 @@ fn horizontal_par_sample<const N: usize, const S: usize, K: Fn(f32) -> f32 + Syn
         .enumerate()
         .par_bridge()
         .for_each(|(y, row)| {
-            for (x, p) in row.chunks_exact_mut(N).enumerate() {
+            for (x, p) in row.as_chunks_mut::<N>().0.iter_mut().enumerate() {
                 p[..N].copy_from_slice(
                     &out[(x * height as usize + y) * N..(x * height as usize + y) * N + N],
                 );
@@ -353,7 +352,7 @@ fn vertical_par_sample<const N: usize, const S: usize, K: Fn(f32) -> f32 + Sync>
             }
             ws.iter_mut().for_each(|w| *w /= sum);
 
-            outrow.chunks_exact_mut(N).enumerate().for_each(|(x, chunk)| {
+            outrow.as_chunks_mut::<N>().0.iter_mut().enumerate().for_each(|(x, chunk)| {
                 let mut t = [0.0; N];
 
 

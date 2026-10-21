@@ -252,7 +252,7 @@ impl MRegion {
         self.width == 0 || self.height == 0
     }
 
-    pub fn fully_contains(&self, other: &Self) -> bool {
+    pub const fn fully_contains(&self, other: &Self) -> bool {
         self.x <= other.x
             && self.x + self.width >= other.x + other.width
             && self.y <= other.y

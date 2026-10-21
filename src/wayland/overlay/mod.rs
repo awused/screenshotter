@@ -183,7 +183,7 @@ impl Overlay {
             &freeze_surface,
             Some(wl_out),
             zwlr_layer_shell_v1::Layer::Overlay,
-            "screenshotter-freeze".to_string(),
+            "screenshotter-freeze",
             qh,
             output,
         );

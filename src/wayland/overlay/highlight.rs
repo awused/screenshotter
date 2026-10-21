@@ -55,7 +55,6 @@ impl Highlight {
             self.drawn = Some(drawn);
         }
 
-
         true
     }
 

@@ -50,7 +50,7 @@ pub struct Conn {
 impl Conn {
     #[instrument(level = "error", skip_all)]
     pub fn init(mode: Mode) -> Result<Self> {
-        let con = Connection::connect_to_env()?;
+        let con = unsafe { Connection::connect_to_env()? };
         let display = con.display();
 
         // Yeah this is weird
@@ -159,7 +159,8 @@ impl Conn {
                 break 'outer;
             };
 
-            let mut fd = AsyncFd::new(guard.connection_fd())?;
+            let mut fd =
+                unsafe { AsyncFd::register(guard.connection_fd()).map_err(|e| eyre!("{e:?}"))? };
 
             let read_result = if let Some(deadline) = self.deadline {
                 match timeout_at(deadline, fd.readable_mut()).await {
