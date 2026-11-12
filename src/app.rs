@@ -113,14 +113,14 @@ impl Application {
 
 #[derive(Debug, Default)]
 pub struct Finder {
-    system: Option<JoinHandle<System>>,
+    system: Option<JoinHandle<Result<System>>>,
 }
 
 
 impl Finder {
     pub fn init() -> Self {
         let system = spawn_blocking(|| {
-            let mut system = System::new();
+            let mut system = System::new()?;
             trace!("Attempting to get info for processes");
             // Getting information on the processes is ~100ms
             if system.refresh_processes_specifics(
@@ -134,7 +134,7 @@ impl Finder {
                 warn!("Failed to get process info for any processes");
             }
             trace!("Finished getting info for processes");
-            system
+            Ok(system)
         });
 
         Self { system: Some(system) }
@@ -184,7 +184,7 @@ impl Finder {
 
             env.insert(WINDOW_PID, pid.to_string().into());
             // system should always be available if the selection includes a window
-            let system = self.system.take().unwrap().await?;
+            let system = self.system.take().unwrap().await??;
             let (name, cmd, pid) = get_process(system, name, pid as u32);
             cli = cmd;
 
